@@ -4,13 +4,13 @@ This repository is the beginning of a very specific kind of CFD project: an inco
 
 That combination matters here. A lot of scientific software grows by accumulating features first and worrying about rigor later. This project is trying to do the opposite. The solver is being designed from the outset around a clear numerical method, explicit validation gates, deterministic execution rules, and a roadmap that only moves forward when the previous layer is correct. If the end result works, it should be the kind of codebase a new engineer can open, reason about, benchmark, and trust.
 
-Right now, the repository is still early. It does not yet contain the full Navier-Stokes timestepper described in the technical spec. What it does contain is the locked-down foundation for that system: the build environment, the project structure, the profile split between validation and benchmarking, the structured-grid and field-storage layer, the first discrete operators, a smoke-test executable, a focused test harness, and a tiny profiling helper. In other words, this repo is already opinionated about how the solver should be built and verified before the time-integration and linear-solver machinery arrives.
+Right now, the repository is still early, but it has moved past the "just scaffolding" stage. It still does not contain the full Navier-Stokes timestepper described in the technical spec, and it does not yet have the production MGPCG pressure solver planned for later milestones. What it does contain is the locked-down foundation for that system plus the first real projection machinery: the build environment, the project structure, the profile split between validation and benchmarking, the structured-grid and field-storage layer, the discrete operators, the transport-term kernels, a reference pressure-projection path, a smoke-test executable, a focused test harness, and a tiny profiling helper. In other words, this repo is already opinionated about how the solver should be built and verified before the larger validation and optimization passes arrive.
 
-If you are reading this as a developer, the shortest useful summary is: this project is building toward a production-grade, Apple-Silicon-native incompressible flow solver, and the repository currently reflects Milestone 3 of that plan.
+If you are reading this as a developer, the shortest useful summary is: this project is building toward a production-grade, Apple-Silicon-native incompressible flow solver, and the repository currently reflects Milestone 4 of that plan.
 
 ## Current Status
 
-The repository is currently at **Milestone 3: Advection and Diffusion**.
+The repository is currently at **Milestone 4: Pressure Projection Core**.
 
 Implemented today:
 
@@ -25,6 +25,9 @@ Implemented today:
 - transport-term kernels for advection and diffusion
 - CFL diagnostics plus explicit advection-scheme and limiter configuration
 - bounded TVD advection with `van Leer` and a first-order upwind fallback
+- reference pressure-projection path with BC mapping and null-space handling
+- deterministic ADI predictor solve with tridiagonal line solves
+- reference Poisson solve for small projection tests before MGPCG arrives
 - a smoke-test executable that reports build/runtime metadata
 - a minimal test executable wired into CTest
 - a simple time-based profiling helper script
@@ -32,13 +35,14 @@ Implemented today:
 
 What is not implemented yet:
 
-- full timestep assembly and projection steps
-- Poisson / multigrid solver infrastructure
+- full timestep assembly around the projection building blocks
+- MGPCG / multigrid pressure-solver infrastructure for production-scale runs
 - checkpointing, benchmark cases, and validation harnesses beyond the current infrastructure tests
 
 Current implementation note:
 
 - the Milestone 3 advection kernel currently supports the planned 2D path; the broader 3D extension still belongs to the later roadmap milestones
+- the Milestone 4 pressure projection is functional and tested, but the pressure solve is still the small-problem reference path, not the Milestone 5 MGPCG implementation
 
 ## Project Goals
 
@@ -88,7 +92,7 @@ The full solver architecture is described in [TECH-SPEC.md](TECH-SPEC.md), but t
 - precision policy: `double` for solution state and pressure-solver reductions
 - validation default: advective CFL `<= 0.5` unless a benchmark case says otherwise
 
-Parts of that numerical path are now implemented at the operator and transport-term layers, and the rest remains the governing design contract for the upcoming milestones.
+Parts of that numerical path are now implemented at the operator, transport, and reference projection layers, and the rest remains the governing design contract for the upcoming milestones.
 
 ## Repository Layout
 
@@ -111,7 +115,7 @@ What those directories mean in practice right now:
 
 - `core/`: runtime/build metadata plus the first structured-grid and field-storage layer
 - `operators/`: second-order structured-grid discrete operators
-- `solver/`: transport-term kernels and CFL diagnostics for the momentum RHS path
+- `solver/`: transport-term kernels, projection helpers, and the current reference pressure-coupling path
 - `tools/`: the smoke-test executable and profiling helper
 - `tests/`: the minimal CTest-backed test executable
 - `linsolve/`, `bc/`, `io/`, `benchmarks/`: scaffolded directories reserved for later milestones
@@ -152,7 +156,7 @@ The current build produces:
 
 - `solver_core`: a small core library for runtime/build metadata and mesh/field infrastructure
 - `solver_operators`: the discrete-operator library built on top of the core field layer
-- `solver_momentum`: advection, diffusion, and CFL utilities for the momentum RHS path
+- `solver_momentum`: advection, diffusion, CFL, and projection utilities for the current solver path
 - `solver_example`: a smoke-test executable under `build/<profile>/tools/`
 - `solver_tests`: a minimal test executable under `build/<profile>/tests/`
 
@@ -170,7 +174,7 @@ Run the benchmark-profile tests:
 ctest --test-dir build/benchmark --output-on-failure
 ```
 
-Today’s test coverage is still intentionally focused, but it now covers the full Milestone 3 gate. The current test executable checks that:
+Today’s test coverage is still intentionally focused, but it now covers the full Milestone 4 gate. The current test executable checks that:
 
 - the build profile is one of the locked profile names
 - the runtime platform is Apple Silicon
@@ -187,8 +191,12 @@ Today’s test coverage is still intentionally focused, but it now covers the fu
 - Taylor-Green step behavior improves under refinement
 - the bounded TVD advection regression case avoids overshoot and undershoot
 - CFL diagnostics and advection-config labels report the expected values
+- physical BC types map to the expected projection-side pressure BC rules
+- the ADI predictor preserves the quiescent state
+- the static-fluid projection path keeps the zero solution unchanged
+- the pure-Neumann projection path removes the pressure null space and restores a divergence-free field
 
-That is enough for Milestone 3. It is not meant to stand in for the full benchmark and regression suite described in the technical spec.
+That is enough for Milestone 4. It is not meant to stand in for the full benchmark and regression suite described in the technical spec.
 
 ## Profiling
 
@@ -212,7 +220,7 @@ The implementation plan is spelled out in [EXECUTION_ROADMAP_V1.md](EXECUTION_RO
 6. Milestone 5: implement the pressure linear solver system
 7. Milestone 6 and beyond: benchmark validation, boundary-condition generalization, restart/output, verification, profiling, optimization, 3D support, and conditional Metal acceleration
 
-The repository has completed the first four items in that sequence and is set up to move into projection and pressure-coupling work next.
+The repository has completed the first five items in that sequence at the reference-implementation level and is set up to move into the dedicated pressure-solver work next.
 
 The important project rule is simple: **do not advance to the next milestone unless the current validation gate passes**.
 

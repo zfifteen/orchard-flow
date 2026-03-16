@@ -3,6 +3,7 @@
 #include "core/runtime.hpp"
 #include "operators/discrete_operators.hpp"
 #include "solver/momentum_terms.hpp"
+#include "solver/projection.hpp"
 
 #include <cmath>
 #include <exception>
@@ -124,6 +125,55 @@ double active_max(const solver::StructuredField& field) {
   return value;
 }
 
+double max_abs_active(const solver::StructuredField& field) {
+  const solver::IndexRange3D active = field.layout().active_range();
+  double value = 0.0;
+
+  for(int k = active.k_begin; k < active.k_end; ++k) {
+    for(int j = active.j_begin; j < active.j_end; ++j) {
+      for(int i = active.i_begin; i < active.i_end; ++i) {
+        value = std::max(value, std::abs(field(i, j, k)));
+      }
+    }
+  }
+
+  return value;
+}
+
+double active_mean_value(const solver::StructuredField& field) {
+  const solver::IndexRange3D active = field.layout().active_range();
+  const std::size_t count = active.extent().cell_count();
+  double sum = 0.0;
+
+  for(int k = active.k_begin; k < active.k_end; ++k) {
+    for(int j = active.j_begin; j < active.j_end; ++j) {
+      for(int i = active.i_begin; i < active.i_end; ++i) {
+        sum += field(i, j, k);
+      }
+    }
+  }
+
+  return sum / static_cast<double>(count);
+}
+
+template <typename Field>
+double active_l2_difference(const Field& left, const Field& right) {
+  const solver::IndexRange3D active = left.layout().active_range();
+  double sum = 0.0;
+  std::size_t count = 0;
+
+  for(int k = active.k_begin; k < active.k_end; ++k) {
+    for(int j = active.j_begin; j < active.j_end; ++j) {
+      for(int i = active.i_begin; i < active.i_end; ++i) {
+        sum += square(left(i, j, k) - right(i, j, k));
+        ++count;
+      }
+    }
+  }
+
+  return std::sqrt(sum / static_cast<double>(count));
+}
+
 template <typename Field>
 void axpy_active(Field& destination, const Field& source, const double scale) {
   const solver::IndexRange3D active = destination.layout().active_range();
@@ -143,6 +193,29 @@ void axpy_velocity(solver::VelocityField& destination,
   axpy_active(destination.x, source.x, scale);
   axpy_active(destination.y, source.y, scale);
   axpy_active(destination.z, source.z, scale);
+}
+
+template <typename Field>
+void scale_active(Field& field, const double scale) {
+  const solver::IndexRange3D active = field.layout().active_range();
+
+  for(int k = active.k_begin; k < active.k_end; ++k) {
+    for(int j = active.j_begin; j < active.j_end; ++j) {
+      for(int i = active.i_begin; i < active.i_end; ++i) {
+        field(i, j, k) *= scale;
+      }
+    }
+  }
+}
+
+void scale_velocity_active(solver::VelocityField& field, const double scale) {
+  scale_active(field.x, scale);
+  scale_active(field.y, scale);
+  scale_active(field.z, scale);
+}
+
+double velocity_max_abs(const solver::VelocityField& velocity) {
+  return std::max({max_abs_active(velocity.x), max_abs_active(velocity.y), max_abs_active(velocity.z)});
 }
 
 void test_build_profile_is_locked() {
@@ -293,6 +366,52 @@ void test_advection_options_and_cfl_diagnostic() {
   require(std::abs(diagnostics.max_w) < 1.0e-12, "wrong max w in CFL diagnostic");
   require(std::abs(diagnostics.max_cfl - dt * (2.0 / 0.25 + 1.0 / 0.5)) < 1.0e-12,
           "wrong CFL value");
+}
+
+void test_projection_boundary_mapping() {
+  solver::BoundaryConditionSet boundary_conditions{};
+  boundary_conditions[solver::BoundaryFace::x_min].type = solver::PhysicalBoundaryType::no_slip_wall;
+  boundary_conditions[solver::BoundaryFace::x_max].type =
+      solver::PhysicalBoundaryType::prescribed_velocity;
+  boundary_conditions[solver::BoundaryFace::y_min].type = solver::PhysicalBoundaryType::symmetry;
+  boundary_conditions[solver::BoundaryFace::y_max].type = solver::PhysicalBoundaryType::fixed_pressure;
+  boundary_conditions[solver::BoundaryFace::y_max].pressure = 1.25;
+  boundary_conditions[solver::BoundaryFace::z_min].type = solver::PhysicalBoundaryType::periodic;
+  boundary_conditions[solver::BoundaryFace::z_max].type = solver::PhysicalBoundaryType::periodic;
+
+  const solver::PressureBoundarySet mapped =
+      solver::derive_pressure_boundary_conditions(boundary_conditions);
+
+  require(mapped[solver::BoundaryFace::x_min].type == solver::PressureBoundaryType::neumann,
+          "no-slip wall should map to pressure Neumann");
+  require(mapped[solver::BoundaryFace::x_max].type == solver::PressureBoundaryType::neumann,
+          "prescribed velocity should map to pressure Neumann");
+  require(mapped[solver::BoundaryFace::y_min].type == solver::PressureBoundaryType::neumann,
+          "symmetry should map to pressure Neumann");
+  require(mapped[solver::BoundaryFace::y_max].type == solver::PressureBoundaryType::dirichlet,
+          "fixed pressure should map to pressure Dirichlet");
+  require(std::abs(mapped[solver::BoundaryFace::y_max].value - 1.25) < 1.0e-12,
+          "fixed pressure value did not carry through the mapping");
+  require(mapped[solver::BoundaryFace::z_min].type == solver::PressureBoundaryType::periodic,
+          "periodic boundary should map to periodic pressure");
+  require(mapped[solver::BoundaryFace::z_max].type == solver::PressureBoundaryType::periodic,
+          "periodic boundary should map to periodic pressure");
+}
+
+void test_predictor_adi_preserves_quiescent_state() {
+  const solver::Grid grid{12, 10, 1, 1.0 / 12.0, 1.0 / 10.0, 1.0, 1};
+  const solver::BoundaryConditionSet boundary_conditions = solver::BoundaryConditionSet::cavity();
+
+  solver::VelocityField rhs{grid};
+  solver::VelocityField predicted{grid};
+  rhs.fill(0.0);
+  predicted.fill(1.0);
+
+  const solver::HelmholtzDiagnostics diagnostics =
+      solver::solve_predictor_adi(rhs, 0.05, boundary_conditions, predicted);
+
+  require(diagnostics.line_solves > 0, "ADI predictor should perform deterministic line solves");
+  require(velocity_max_abs(predicted) <= 1.0e-12, "quiescent predictor state should remain zero");
 }
 
 struct ManufacturedErrors {
@@ -510,6 +629,100 @@ void test_bounded_advection_regression_case() {
   require(active_max(updated.z) <= 1.0 + 1.0e-12, "bounded TVD update overshot the maximum");
 }
 
+void test_static_projection_preserves_quiescent_fluid() {
+  const solver::Grid grid{16, 12, 1, 1.0 / 16.0, 1.0 / 12.0, 1.0, 1};
+  const solver::BoundaryConditionSet boundary_conditions = solver::BoundaryConditionSet::cavity();
+  const solver::ProjectionOptions options{
+      .dt = 0.05,
+      .density = 1.0,
+      .poisson_max_iterations = 2000,
+      .poisson_tolerance = 1.0e-12,
+  };
+
+  solver::VelocityField predicted{grid};
+  solver::VelocityField corrected{grid};
+  solver::PressureField pressure{grid};
+  solver::ScalarField pressure_rhs{grid};
+  predicted.fill(0.0);
+  corrected.fill(0.0);
+  pressure.fill(0.0);
+
+  const solver::ProjectionDiagnostics diagnostics =
+      solver::project_velocity(predicted, boundary_conditions, options, pressure, corrected, &pressure_rhs);
+
+  require(diagnostics.pressure_solve.converged, "zero-RHS pressure solve should converge immediately");
+  require(diagnostics.pressure_solve.iterations == 0, "quiescent projection should not iterate");
+  require(diagnostics.rhs_l2 <= 1.0e-14, "quiescent projection RHS should remain zero");
+  require(diagnostics.divergence_l2_before <= 1.0e-14,
+          "quiescent predicted field should already be divergence free");
+  require(diagnostics.divergence_l2_after <= 1.0e-14,
+          "quiescent corrected field should remain divergence free");
+  require(std::abs(diagnostics.pressure_mean) <= 1.0e-14, "quiescent pressure should remain zero");
+  require(velocity_max_abs(corrected) <= 1.0e-12, "quiescent corrected velocity should remain zero");
+}
+
+void test_pure_neumann_projection_recovers_zero_mean_pressure() {
+  const int resolution = 24;
+  const solver::Grid grid{resolution, resolution, 1,
+                          1.0 / static_cast<double>(resolution),
+                          1.0 / static_cast<double>(resolution),
+                          1.0,
+                          1};
+  const solver::BoundaryConditionSet boundary_conditions =
+      solver::BoundaryConditionSet::all(solver::PhysicalBoundaryType::symmetry);
+  const solver::ProjectionOptions options{
+      .dt = 0.025,
+      .density = 1.0,
+      .poisson_max_iterations = 4000,
+      .poisson_tolerance = 1.0e-12,
+  };
+  const solver::PressureBoundarySet pressure_boundaries =
+      solver::derive_pressure_boundary_conditions(boundary_conditions);
+
+  solver::PressureField expected_pressure{grid};
+  fill_storage(expected_pressure, [](const double x, const double y, double) {
+    const double sx = std::sin(pi() * x);
+    const double sy = std::sin(pi() * y);
+    return sx * sx * sy * sy;
+  });
+  solver::apply_pressure_boundary_conditions(pressure_boundaries, expected_pressure);
+
+  solver::VelocityField predicted{grid};
+  solver::operators::compute_gradient(expected_pressure, predicted);
+  scale_velocity_active(predicted, options.dt);
+  solver::apply_velocity_boundary_conditions(boundary_conditions, predicted);
+
+  solver::PressureField pressure{grid};
+  solver::VelocityField corrected{grid};
+  pressure.fill(0.0);
+  corrected.fill(0.0);
+
+  const solver::ProjectionDiagnostics diagnostics =
+      solver::project_velocity(predicted, boundary_conditions, options, pressure, corrected);
+
+  const double expected_mean = active_mean_value(expected_pressure);
+  const solver::IndexRange3D active = expected_pressure.layout().active_range();
+  for(int k = active.k_begin; k < active.k_end; ++k) {
+    for(int j = active.j_begin; j < active.j_end; ++j) {
+      for(int i = active.i_begin; i < active.i_end; ++i) {
+        expected_pressure(i, j, k) -= expected_mean;
+      }
+    }
+  }
+  solver::apply_pressure_boundary_conditions(pressure_boundaries, expected_pressure);
+
+  const double pressure_error = active_l2_difference(pressure, expected_pressure);
+  require(diagnostics.pressure_solve.converged, "pure-Neumann pressure solve should converge");
+  require(diagnostics.pressure_solve.zero_mean_enforced,
+          "pure-Neumann pressure solve should enforce zero mean");
+  require(std::abs(diagnostics.pressure_mean) <= 1.0e-10,
+          "pure-Neumann solve should remove the pressure null space");
+  require(pressure_error <= 1.0e-8, "pressure recovery error is too large");
+  require(velocity_max_abs(corrected) <= 1.0e-8, "projection should remove the gradient field");
+  require(diagnostics.divergence_l2_after <= 1.0e-10,
+          "projection should leave a divergence-free corrected field");
+}
+
 }  // namespace
 
 int main() {
@@ -524,10 +737,14 @@ int main() {
     test_cell_and_face_placement();
     test_double_precision_storage_contract();
     test_advection_options_and_cfl_diagnostic();
+    test_projection_boundary_mapping();
+    test_predictor_adi_preserves_quiescent_state();
     test_manufactured_solution_convergence();
     test_diffusion_term_matches_scaled_laplacian();
     test_taylor_green_step_behavior();
     test_bounded_advection_regression_case();
+    test_static_projection_preserves_quiescent_fluid();
+    test_pure_neumann_projection_recovers_zero_mean_pressure();
   } catch(const std::exception& exception) {
     std::cerr << "solver_tests failed: " << exception.what() << '\n';
     return 1;

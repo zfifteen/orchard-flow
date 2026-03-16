@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="560" viewBox="0 0 900 560">
+<rect width="100%" height="100%" fill="#fffdf7"/>
+<text x="450.0" y="32" text-anchor="middle" font-size="22" font-family="Georgia, serif">Taylor-Green Temporal Refinement</text>
+<line x1="100" y1="480" x2="860" y2="480" stroke="#111827" stroke-width="2"/>
+<line x1="100" y1="60" x2="100" y2="480" stroke="#111827" stroke-width="2"/>
+<text x="450.0" y="538" text-anchor="middle" font-size="16" font-family="Menlo, monospace">dt</text>
+<text x="26" y="280.0" transform="rotate(-90 26 280.0)" text-anchor="middle" font-size="16" font-family="Menlo, monospace">Error</text>
+<line x1="100.0" y1="480" x2="100.0" y2="486" stroke="#111827" stroke-width="1"/>
+<text x="100.0" y="504" text-anchor="middle" font-size="13" font-family="Menlo, monospace">0.0061</text>
+<line x1="486.47770361794556" y1="480" x2="486.47770361794556" y2="486" stroke="#111827" stroke-width="1"/>
+<text x="486.47770361794556" y="504" text-anchor="middle" font-size="13" font-family="Menlo, monospace">0.0119</text>
+<line x1="860.0" y1="480" x2="860.0" y2="486" stroke="#111827" stroke-width="1"/>
+<text x="860.0" y="504" text-anchor="middle" font-size="13" font-family="Menlo, monospace">0.0227</text>
+<line x1="94" y1="480.0" x2="100" y2="480.0" stroke="#111827" stroke-width="1"/>
+<text x="90" y="484.0" text-anchor="end" font-size="13" font-family="Menlo, monospace">8.86e-06</text>
+<line x1="94" y1="380.3824678441607" x2="100" y2="380.3824678441607" stroke="#111827" stroke-width="1"/>
+<text x="90" y="384.3824678441607" text-anchor="end" font-size="13" font-family="Menlo, monospace">3.41e-05</text>
+<line x1="94" y1="156.6297046936204" x2="100" y2="156.6297046936204" stroke="#111827" stroke-width="1"/>
+<text x="90" y="160.6297046936204" text-anchor="end" font-size="13" font-family="Menlo, monospace">0.000702</text>
+<line x1="94" y1="156.62949392140405" x2="100" y2="156.62949392140405" stroke="#111827" stroke-width="1"/>
+<text x="90" y="160.62949392140405" text-anchor="end" font-size="13" font-family="Menlo, monospace">0.000702</text>
+<line x1="94" y1="156.62517322333434" x2="100" y2="156.62517322333434" stroke="#111827" stroke-width="1"/>
+<text x="90" y="160.62517322333434" text-anchor="end" font-size="13" font-family="Menlo, monospace">0.000702</text>
+<line x1="94" y1="60.17683966397942" x2="100" y2="60.17683966397942" stroke="#111827" stroke-width="1"/>
+<text x="90" y="64.17683966397942" text-anchor="end" font-size="13" font-family="Menlo, monospace">0.00259</text>
+<line x1="94" y1="60.14023715632146" x2="100" y2="60.14023715632146" stroke="#111827" stroke-width="1"/>
+<text x="90" y="64.14023715632146" text-anchor="end" font-size="13" font-family="Menlo, monospace">0.00259</text>
+<line x1="94" y1="60.0" x2="100" y2="60.0" stroke="#111827" stroke-width="1"/>
+<text x="90" y="64.0" text-anchor="end" font-size="13" font-family="Menlo, monospace">0.00259</text>
+<polyline fill="none" stroke="#0f766e" stroke-width="3" points="860.0,156.62517322333434 486.47770361794556,156.6297046936204 100.0,156.62949392140405"/>
+<circle cx="860.0" cy="156.62517322333434" r="4" fill="#0f766e"/>
+<circle cx="486.47770361794556" cy="156.6297046936204" r="4" fill="#0f766e"/>
+<circle cx="100.0" cy="156.62949392140405" r="4" fill="#0f766e"/>
+<line x1="640" y1="72" x2="664" y2="72" stroke="#0f766e" stroke-width="3"/>
+<text x="672" y="76" font-size="14" font-family="Menlo, monospace">energy</text>
+<polyline fill="none" stroke="#b45309" stroke-width="3" points="860.0,60.0 486.47770361794556,60.14023715632146 100.0,60.17683966397942"/>
+<circle cx="860.0" cy="60.0" r="4" fill="#b45309"/>
+<circle cx="486.47770361794556" cy="60.14023715632146" r="4" fill="#b45309"/>
+<circle cx="100.0" cy="60.17683966397942" r="4" fill="#b45309"/>
+<line x1="640" y1="96" x2="664" y2="96" stroke="#b45309" stroke-width="3"/>
+<text x="672" y="100" font-size="14" font-family="Menlo, monospace">velocity</text>
+<polyline fill="none" stroke="#1d4ed8" stroke-width="3" points="860.0,380.3824678441607 486.47770361794556,480.0"/>
+<circle cx="860.0" cy="380.3824678441607" r="4" fill="#1d4ed8"/>
+<circle cx="486.47770361794556" cy="480.0" r="4" fill="#1d4ed8"/>
+<line x1="640" y1="120" x2="664" y2="120" stroke="#1d4ed8" stroke-width="3"/>
+<text x="672" y="124" font-size="14" font-family="Menlo, monospace">self-convergence</text>
+</svg>

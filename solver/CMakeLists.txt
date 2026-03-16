@@ -2,7 +2,9 @@ add_library(solver_momentum STATIC
   channel_flow.cpp
   lid_driven_cavity.cpp
   momentum_terms.cpp
+  operator_verification.cpp
   projection.cpp
+  taylor_green.cpp
 )
 
 target_include_directories(solver_momentum

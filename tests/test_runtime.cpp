@@ -8,7 +8,9 @@
 #include "solver/channel_flow.hpp"
 #include "solver/lid_driven_cavity.hpp"
 #include "solver/momentum_terms.hpp"
+#include "solver/operator_verification.hpp"
 #include "solver/projection.hpp"
+#include "solver/taylor_green.hpp"
 
 #include <bit>
 #include <cmath>
@@ -1144,51 +1146,12 @@ struct ManufacturedErrors {
 };
 
 ManufacturedErrors run_manufactured_solution_case(const int resolution) {
-  const double domain_length = 2.0 * pi();
-  const double spacing = domain_length / static_cast<double>(resolution);
-  const solver::Grid grid{resolution, resolution, 1, spacing, spacing, 1.0, 1};
-
-  solver::PressureField pressure{grid};
-  solver::VelocityField exact_velocity{grid};
-  solver::VelocityField gradient{grid};
-  solver::ScalarField divergence{grid};
-  solver::PressureField laplacian{grid};
-
-  fill_storage(pressure, [](const double x, const double y, double) {
-    return std::sin(x) * std::cos(y);
-  });
-
-  fill_storage(exact_velocity.x, [](const double x, const double y, double) {
-    return std::sin(x) * std::cos(y);
-  });
-  fill_storage(exact_velocity.y, [](const double x, const double y, double) {
-    return std::cos(x) * std::sin(y);
-  });
-  fill_storage(exact_velocity.z, [](double, double, double) {
-    return 0.0;
-  });
-
-  solver::operators::compute_gradient(pressure, gradient);
-  solver::operators::compute_divergence(exact_velocity, divergence);
-  solver::operators::compute_laplacian(pressure, laplacian);
-
-  const double gradient_x_error = active_l2_error(gradient.x, [](const double x, const double y, double) {
-    return std::cos(x) * std::cos(y);
-  });
-  const double gradient_y_error = active_l2_error(gradient.y, [](const double x, const double y, double) {
-    return -std::sin(x) * std::sin(y);
-  });
-  const double divergence_error = active_l2_error(divergence, [](const double x, const double y, double) {
-    return 2.0 * std::cos(x) * std::cos(y);
-  });
-  const double laplacian_error = active_l2_error(laplacian, [](const double x, const double y, double) {
-    return -2.0 * std::sin(x) * std::cos(y);
-  });
-
+  const solver::OperatorManufacturedSolutionResult result =
+      solver::run_operator_manufactured_solution_case(resolution);
   return ManufacturedErrors{
-      .gradient = std::sqrt(0.5 * (square(gradient_x_error) + square(gradient_y_error))),
-      .divergence = divergence_error,
-      .laplacian = laplacian_error,
+      .gradient = result.gradient_error,
+      .divergence = result.divergence_error,
+      .laplacian = result.laplacian_error,
   };
 }
 
@@ -1564,6 +1527,55 @@ void test_channel_flow_poiseuille_profile_validation() {
   require(result.validation.pass, "Poiseuille smoke validation should pass");
 }
 
+void test_taylor_green_config_loader_and_boundary_conditions() {
+  const solver::TaylorGreenConfig config = solver::load_taylor_green_config(
+      source_path("benchmarks/taylor_green_smoke.cfg"));
+  require(config.nx == 48 && config.ny == 48, "Taylor-Green smoke config should load the grid size");
+  require(std::abs(config.viscosity - 0.01) <= 1.0e-12,
+          "Taylor-Green smoke viscosity mismatch");
+  require(config.validate_energy, "Taylor-Green smoke config should validate the decay");
+
+  const solver::BoundaryConditionSet boundary_conditions =
+      solver::make_taylor_green_boundary_conditions();
+  require(boundary_conditions[solver::BoundaryFace::x_min].type ==
+              solver::PhysicalBoundaryType::periodic,
+          "Taylor-Green x_min should be periodic");
+  require(boundary_conditions[solver::BoundaryFace::x_max].type ==
+              solver::PhysicalBoundaryType::periodic,
+          "Taylor-Green x_max should be periodic");
+  require(boundary_conditions[solver::BoundaryFace::y_min].type ==
+              solver::PhysicalBoundaryType::periodic,
+          "Taylor-Green y_min should be periodic");
+  require(boundary_conditions[solver::BoundaryFace::y_max].type ==
+              solver::PhysicalBoundaryType::periodic,
+          "Taylor-Green y_max should be periodic");
+  require(boundary_conditions[solver::BoundaryFace::z_min].type ==
+              solver::PhysicalBoundaryType::symmetry,
+          "Taylor-Green z_min should map to symmetry");
+  require(boundary_conditions[solver::BoundaryFace::z_max].type ==
+              solver::PhysicalBoundaryType::symmetry,
+          "Taylor-Green z_max should map to symmetry");
+}
+
+void test_taylor_green_smoke_validation() {
+  const solver::TaylorGreenConfig config = solver::load_taylor_green_config(
+      source_path("benchmarks/taylor_green_smoke.cfg"));
+  const solver::TaylorGreenResult result = solver::run_taylor_green(config);
+
+  require(result.final_step.step > 0, "Taylor-Green smoke run should advance at least one step");
+  require(std::abs(result.final_step.time - config.final_time) <= 1.0e-12,
+          "Taylor-Green smoke run should land on the configured final time");
+  require(result.final_step.max_cfl <= config.cfl_limit + 1.0e-12,
+          "Taylor-Green CFL should respect the configured ceiling");
+  require(result.final_step.divergence_l2 <= 1.0e-10,
+          "Taylor-Green smoke run should remain divergence free");
+  require(result.validation.reference_dataset == "analytic_taylor_green_decay",
+          "Taylor-Green validation should report the analytic decay dataset");
+  require(result.validation.normalized_energy_error <= 1.0e-2,
+          "Taylor-Green smoke energy error exceeded the M9 threshold");
+  require(result.validation.pass, "Taylor-Green smoke validation should pass");
+}
+
 void test_lid_driven_cavity_checkpoint_roundtrip_and_checksum() {
   solver::LidDrivenCavityConfig config = solver::load_lid_driven_cavity_config(
       source_path("benchmarks/lid_driven_cavity_smoke.cfg"));
@@ -1809,6 +1821,8 @@ int main() {
     test_channel_flow_config_loader_and_boundary_conditions();
     test_channel_flow_couette_profile_validation();
     test_channel_flow_poiseuille_profile_validation();
+    test_taylor_green_config_loader_and_boundary_conditions();
+    test_taylor_green_smoke_validation();
     test_lid_driven_cavity_checkpoint_roundtrip_and_checksum();
     test_lid_driven_cavity_restart_is_bitwise_deterministic();
     test_lid_driven_cavity_vtk_export();

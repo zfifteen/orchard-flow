@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="560" viewBox="0 0 900 560">
+<rect width="100%" height="100%" fill="#fffdf7"/>
+<text x="450.0" y="32" text-anchor="middle" font-size="22" font-family="Georgia, serif">Operator MMS Spatial Convergence</text>
+<line x1="100" y1="480" x2="860" y2="480" stroke="#111827" stroke-width="2"/>
+<line x1="100" y1="60" x2="100" y2="480" stroke="#111827" stroke-width="2"/>
+<text x="450.0" y="538" text-anchor="middle" font-size="16" font-family="Menlo, monospace">Resolution</text>
+<text x="26" y="280.0" transform="rotate(-90 26 280.0)" text-anchor="middle" font-size="16" font-family="Menlo, monospace">L2 Error</text>
+<line x1="100.0" y1="480" x2="100.0" y2="486" stroke="#111827" stroke-width="1"/>
+<text x="100.0" y="504" text-anchor="middle" font-size="13" font-family="Menlo, monospace">16</text>
+<line x1="480.0000000000001" y1="480" x2="480.0000000000001" y2="486" stroke="#111827" stroke-width="1"/>
+<text x="480.0000000000001" y="504" text-anchor="middle" font-size="13" font-family="Menlo, monospace">32</text>
+<line x1="860.0" y1="480" x2="860.0" y2="486" stroke="#111827" stroke-width="1"/>
+<text x="860.0" y="504" text-anchor="middle" font-size="13" font-family="Menlo, monospace">64</text>
+<line x1="94" y1="480.0" x2="100" y2="480.0" stroke="#111827" stroke-width="1"/>
+<text x="90" y="484.0" text-anchor="end" font-size="13" font-family="Menlo, monospace">0.000201</text>
+<line x1="94" y1="409.91524556449315" x2="100" y2="409.91524556449315" stroke="#111827" stroke-width="1"/>
+<text x="90" y="413.91524556449315" text-anchor="end" font-size="13" font-family="Menlo, monospace">0.000402</text>
+<line x1="94" y1="339.8673868443443" x2="100" y2="339.8673868443443" stroke="#111827" stroke-width="1"/>
+<text x="90" y="343.8673868443443" text-anchor="end" font-size="13" font-family="Menlo, monospace">0.000803</text>
+<line x1="94" y1="339.85114099701025" x2="100" y2="339.85114099701025" stroke="#111827" stroke-width="1"/>
+<text x="90" y="343.85114099701025" text-anchor="end" font-size="13" font-family="Menlo, monospace">0.000803</text>
+<line x1="94" y1="269.7826323181914" x2="100" y2="269.7826323181914" stroke="#111827" stroke-width="1"/>
+<text x="90" y="273.7826323181914" text-anchor="end" font-size="13" font-family="Menlo, monospace">0.00161</text>
+<line x1="94" y1="199.84464872301749" x2="100" y2="199.84464872301749" stroke="#111827" stroke-width="1"/>
+<text x="90" y="203.84464872301749" text-anchor="end" font-size="13" font-family="Menlo, monospace">0.00321</text>
+<line x1="94" y1="199.77939789707295" x2="100" y2="199.77939789707295" stroke="#111827" stroke-width="1"/>
+<text x="90" y="203.77939789707295" text-anchor="end" font-size="13" font-family="Menlo, monospace">0.00321</text>
+<line x1="94" y1="129.75998842895365" x2="100" y2="129.75998842895365" stroke="#111827" stroke-width="1"/>
+<text x="90" y="133.75998842895365" text-anchor="end" font-size="13" font-family="Menlo, monospace">0.00641</text>
+<line x1="94" y1="60.0" x2="100" y2="60.0" stroke="#111827" stroke-width="1"/>
+<text x="90" y="64.0" text-anchor="end" font-size="13" font-family="Menlo, monospace">0.0128</text>
+<polyline fill="none" stroke="#0f766e" stroke-width="3" points="100.0,199.84464872301749 480.0000000000001,339.8673868443443 860.0,480.0"/>
+<circle cx="100.0" cy="199.84464872301749" r="4" fill="#0f766e"/>
+<circle cx="480.0000000000001" cy="339.8673868443443" r="4" fill="#0f766e"/>
+<circle cx="860.0" cy="480.0" r="4" fill="#0f766e"/>
+<line x1="640" y1="72" x2="664" y2="72" stroke="#0f766e" stroke-width="3"/>
+<text x="672" y="76" font-size="14" font-family="Menlo, monospace">gradient</text>
+<polyline fill="none" stroke="#b45309" stroke-width="3" points="100.0,129.75998842895365 480.0000000000001,269.7826323181914 860.0,409.91524556449315"/>
+<circle cx="100.0" cy="129.75998842895365" r="4" fill="#b45309"/>
+<circle cx="480.0000000000001" cy="269.7826323181914" r="4" fill="#b45309"/>
+<circle cx="860.0" cy="409.91524556449315" r="4" fill="#b45309"/>
+<line x1="640" y1="96" x2="664" y2="96" stroke="#b45309" stroke-width="3"/>
+<text x="672" y="100" font-size="14" font-family="Menlo, monospace">divergence</text>
+<polyline fill="none" stroke="#1d4ed8" stroke-width="3" points="100.0,60.0 480.0000000000001,199.77939789707295 860.0,339.85114099701025"/>
+<circle cx="100.0" cy="60.0" r="4" fill="#1d4ed8"/>
+<circle cx="480.0000000000001" cy="199.77939789707295" r="4" fill="#1d4ed8"/>
+<circle cx="860.0" cy="339.85114099701025" r="4" fill="#1d4ed8"/>
+<line x1="640" y1="120" x2="664" y2="120" stroke="#1d4ed8" stroke-width="3"/>
+<text x="672" y="124" font-size="14" font-family="Menlo, monospace">laplacian</text>
+</svg>

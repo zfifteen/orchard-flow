@@ -1,6 +1,7 @@
 #include "core/fields.hpp"
 #include "core/grid.hpp"
 #include "core/runtime.hpp"
+#include "linsolve/poisson_solver.hpp"
 #include "operators/discrete_operators.hpp"
 #include "solver/momentum_terms.hpp"
 #include "solver/projection.hpp"
@@ -172,6 +173,58 @@ double active_l2_difference(const Field& left, const Field& right) {
   }
 
   return std::sqrt(sum / static_cast<double>(count));
+}
+
+template <typename Field>
+double active_l2_norm_value(const Field& field) {
+  const solver::IndexRange3D active = field.layout().active_range();
+  double sum = 0.0;
+  std::size_t count = 0;
+
+  for(int k = active.k_begin; k < active.k_end; ++k) {
+    for(int j = active.j_begin; j < active.j_end; ++j) {
+      for(int i = active.i_begin; i < active.i_end; ++i) {
+        sum += square(field(i, j, k));
+        ++count;
+      }
+    }
+  }
+
+  return std::sqrt(sum / static_cast<double>(count));
+}
+
+template <typename Field>
+double relative_active_l2_difference(const Field& left, const Field& right) {
+  const double denominator = active_l2_norm_value(right);
+  require(denominator > 0.0, "relative_active_l2_difference requires non-zero reference norm");
+  return active_l2_difference(left, right) / denominator;
+}
+
+template <typename Field>
+void subtract_active_mean_inplace(Field& field) {
+  const double mean = active_mean_value(field);
+  const solver::IndexRange3D active = field.layout().active_range();
+
+  for(int k = active.k_begin; k < active.k_end; ++k) {
+    for(int j = active.j_begin; j < active.j_end; ++j) {
+      for(int i = active.i_begin; i < active.i_end; ++i) {
+        field(i, j, k) -= mean;
+      }
+    }
+  }
+}
+
+template <typename FromField, typename ToField>
+void copy_active_values(const FromField& source, ToField& destination) {
+  const solver::IndexRange3D active = source.layout().active_range();
+
+  for(int k = active.k_begin; k < active.k_end; ++k) {
+    for(int j = active.j_begin; j < active.j_end; ++j) {
+      for(int i = active.i_begin; i < active.i_end; ++i) {
+        destination(i, j, k) = source(i, j, k);
+      }
+    }
+  }
 }
 
 template <typename Field>
@@ -412,6 +465,99 @@ void test_predictor_adi_preserves_quiescent_state() {
 
   require(diagnostics.line_solves > 0, "ADI predictor should perform deterministic line solves");
   require(velocity_max_abs(predicted) <= 1.0e-12, "quiescent predictor state should remain zero");
+}
+
+void test_poisson_mgpcg_discrete_dirichlet_recovery() {
+  const int resolution = 32;
+  const solver::Grid grid{resolution,
+                          resolution,
+                          1,
+                          1.0 / static_cast<double>(resolution),
+                          1.0 / static_cast<double>(resolution),
+                          1.0,
+                          1};
+  solver::PressureBoundarySet boundary_conditions{};
+  boundary_conditions[solver::BoundaryFace::x_min].type = solver::PressureBoundaryType::dirichlet;
+  boundary_conditions[solver::BoundaryFace::x_max].type = solver::PressureBoundaryType::dirichlet;
+  boundary_conditions[solver::BoundaryFace::y_min].type = solver::PressureBoundaryType::dirichlet;
+  boundary_conditions[solver::BoundaryFace::y_max].type = solver::PressureBoundaryType::dirichlet;
+  boundary_conditions[solver::BoundaryFace::z_min].type = solver::PressureBoundaryType::neumann;
+  boundary_conditions[solver::BoundaryFace::z_max].type = solver::PressureBoundaryType::neumann;
+
+  solver::PressureField exact_pressure{grid};
+  solver::ScalarField rhs{grid};
+  solver::PressureField solution{grid};
+  fill_storage(exact_pressure, [](const double x, const double y, double) {
+    return std::sin(pi() * x) * std::sin(pi() * y);
+  });
+
+  solver::linsolve::build_poisson_rhs_from_pressure(exact_pressure, boundary_conditions, rhs);
+  solution.fill(0.0);
+
+  const solver::ProjectionOptions options{
+      .dt = 1.0,
+      .density = 1.0,
+      .poisson_max_iterations = 200,
+      .poisson_tolerance = 1.0e-10,
+  };
+  const solver::PoissonSolveDiagnostics diagnostics =
+      solver::linsolve::solve_pressure_poisson(rhs, boundary_conditions, options, solution);
+
+  const double relative_error = relative_active_l2_difference(solution, exact_pressure);
+  require(diagnostics.converged, "MGPCG Dirichlet solve should converge");
+  require(diagnostics.relative_residual <= 1.0e-10, "MGPCG relative residual is too large");
+  require(relative_error <= 1.0e-8, "MGPCG Dirichlet recovery error is too large");
+  require(diagnostics.multigrid_levels >= 2, "MGPCG should build a multigrid hierarchy");
+  require(diagnostics.coarse_unknowns > 0, "MGPCG should report the coarse-grid size");
+  require(diagnostics.solver == "mgpcg", "unexpected pressure solver label");
+  require(diagnostics.preconditioner == "geometric_multigrid", "unexpected preconditioner label");
+  require(diagnostics.cycle == "v_cycle", "unexpected multigrid cycle label");
+  require(diagnostics.smoother == "damped_jacobi", "unexpected smoother label");
+  require(diagnostics.pre_smoothing_steps == 2, "unexpected pre-smoothing policy");
+  require(diagnostics.post_smoothing_steps == 2, "unexpected post-smoothing policy");
+}
+
+void test_poisson_mgpcg_pure_neumann_zero_mean_recovery() {
+  const int resolution = 24;
+  const solver::Grid grid{resolution,
+                          resolution,
+                          1,
+                          1.0 / static_cast<double>(resolution),
+                          1.0 / static_cast<double>(resolution),
+                          1.0,
+                          1};
+  solver::PressureBoundarySet boundary_conditions{};
+  for(solver::PressureBoundaryCondition& boundary : boundary_conditions.faces) {
+    boundary.type = solver::PressureBoundaryType::neumann;
+  }
+
+  solver::PressureField exact_pressure{grid};
+  solver::ScalarField rhs{grid};
+  solver::PressureField solution{grid};
+  fill_storage(exact_pressure, [](const double x, const double y, double) {
+    return std::cos(2.0 * pi() * x) * std::cos(2.0 * pi() * y);
+  });
+  subtract_active_mean_inplace(exact_pressure);
+
+  solver::linsolve::build_poisson_rhs_from_pressure(exact_pressure, boundary_conditions, rhs);
+  solution.fill(0.0);
+
+  const solver::ProjectionOptions options{
+      .dt = 1.0,
+      .density = 1.0,
+      .poisson_max_iterations = 300,
+      .poisson_tolerance = 1.0e-10,
+  };
+  const solver::PoissonSolveDiagnostics diagnostics =
+      solver::linsolve::solve_pressure_poisson(rhs, boundary_conditions, options, solution);
+
+  const double relative_error = relative_active_l2_difference(solution, exact_pressure);
+  require(diagnostics.converged, "MGPCG pure-Neumann solve should converge");
+  require(diagnostics.zero_mean_enforced, "pure-Neumann solve should enforce zero mean");
+  require(std::abs(active_mean_value(solution)) <= 1.0e-10,
+          "pure-Neumann solve should preserve zero-mean pressure");
+  require(diagnostics.relative_residual <= 1.0e-10, "pure-Neumann relative residual is too large");
+  require(relative_error <= 1.0e-8, "pure-Neumann recovery error is too large");
 }
 
 struct ManufacturedErrors {
@@ -739,6 +885,8 @@ int main() {
     test_advection_options_and_cfl_diagnostic();
     test_projection_boundary_mapping();
     test_predictor_adi_preserves_quiescent_state();
+    test_poisson_mgpcg_discrete_dirichlet_recovery();
+    test_poisson_mgpcg_pure_neumann_zero_mean_recovery();
     test_manufactured_solution_convergence();
     test_diffusion_term_matches_scaled_laplacian();
     test_taylor_green_step_behavior();

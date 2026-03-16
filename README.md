@@ -4,13 +4,13 @@ This repository is the beginning of a very specific kind of CFD project: an inco
 
 That combination matters here. A lot of scientific software grows by accumulating features first and worrying about rigor later. This project is trying to do the opposite. The solver is being designed from the outset around a clear numerical method, explicit validation gates, deterministic execution rules, and a roadmap that only moves forward when the previous layer is correct. If the end result works, it should be the kind of codebase a new engineer can open, reason about, benchmark, and trust.
 
-Right now, the repository is still early, but it has moved past the "just scaffolding" stage. It still does not contain the full Navier-Stokes timestepper described in the technical spec, and it does not yet have the production MGPCG pressure solver planned for later milestones. What it does contain is the locked-down foundation for that system plus the first real projection machinery: the build environment, the project structure, the profile split between validation and benchmarking, the structured-grid and field-storage layer, the discrete operators, the transport-term kernels, a reference pressure-projection path, a smoke-test executable, a focused test harness, and a tiny profiling helper. In other words, this repo is already opinionated about how the solver should be built and verified before the larger validation and optimization passes arrive.
+Right now, the repository is still early, but it has moved well past the "just scaffolding" stage. It still does not contain the full incompressible timestepper or the benchmark driver stack described in the technical spec, but the numerical core is starting to look like a real solver rather than a pile of placeholders. What it contains today is the locked-down foundation for that system plus the first complete pressure-coupling path: the build environment, the project structure, the profile split between validation and benchmarking, the structured-grid and field-storage layer, the discrete operators, the transport-term kernels, the projection machinery, and now the matrix-free MGPCG pressure solver that the later simulation milestones will depend on. In other words, this repo is already opinionated about how the solver should be built, validated, and evolved before the larger simulation and optimization passes arrive.
 
-If you are reading this as a developer, the shortest useful summary is: this project is building toward a production-grade, Apple-Silicon-native incompressible flow solver, and the repository currently reflects Milestone 4 of that plan.
+If you are reading this as a developer, the shortest useful summary is: this project is building toward a production-grade, Apple-Silicon-native incompressible flow solver, and the repository currently reflects Milestone 5 of that plan.
 
 ## Current Status
 
-The repository is currently at **Milestone 4: Pressure Projection Core**.
+The repository is currently at **Milestone 5: Linear Solver System**.
 
 Implemented today:
 
@@ -25,9 +25,12 @@ Implemented today:
 - transport-term kernels for advection and diffusion
 - CFL diagnostics plus explicit advection-scheme and limiter configuration
 - bounded TVD advection with `van Leer` and a first-order upwind fallback
-- reference pressure-projection path with BC mapping and null-space handling
+- pressure-projection path with BC mapping and null-space handling
 - deterministic ADI predictor solve with tridiagonal line solves
-- reference Poisson solve for small projection tests before MGPCG arrives
+- matrix-free pressure Poisson operator
+- MGPCG pressure solve with fixed V-cycle geometric multigrid preconditioning
+- damped-Jacobi multigrid smoothing and a direct coarse-grid solve
+- residual-history tracking plus multigrid policy diagnostics
 - a smoke-test executable that reports build/runtime metadata
 - a minimal test executable wired into CTest
 - a simple time-based profiling helper script
@@ -35,14 +38,13 @@ Implemented today:
 
 What is not implemented yet:
 
-- full timestep assembly around the projection building blocks
-- MGPCG / multigrid pressure-solver infrastructure for production-scale runs
+- full timestep assembly around the projection and pressure-solver building blocks
 - checkpointing, benchmark cases, and validation harnesses beyond the current infrastructure tests
 
 Current implementation note:
 
 - the Milestone 3 advection kernel currently supports the planned 2D path; the broader 3D extension still belongs to the later roadmap milestones
-- the Milestone 4 pressure projection is functional and tested, but the pressure solve is still the small-problem reference path, not the Milestone 5 MGPCG implementation
+- the Milestone 5 pressure solver is in place for the current validation-scale problems, but the full simulation driver, benchmark cases, and large-scale profiling work still belong to later milestones
 
 ## Project Goals
 
@@ -92,7 +94,7 @@ The full solver architecture is described in [TECH-SPEC.md](TECH-SPEC.md), but t
 - precision policy: `double` for solution state and pressure-solver reductions
 - validation default: advective CFL `<= 0.5` unless a benchmark case says otherwise
 
-Parts of that numerical path are now implemented at the operator, transport, and reference projection layers, and the rest remains the governing design contract for the upcoming milestones.
+Parts of that numerical path are now implemented at the operator, transport, projection, and linear-solver layers, and the rest remains the governing design contract for the upcoming milestones.
 
 ## Repository Layout
 
@@ -115,10 +117,11 @@ What those directories mean in practice right now:
 
 - `core/`: runtime/build metadata plus the first structured-grid and field-storage layer
 - `operators/`: second-order structured-grid discrete operators
-- `solver/`: transport-term kernels, projection helpers, and the current reference pressure-coupling path
+- `linsolve/`: matrix-free pressure operator and MGPCG linear-solver implementation
+- `solver/`: transport-term kernels and projection helpers built on top of the linsolve layer
 - `tools/`: the smoke-test executable and profiling helper
 - `tests/`: the minimal CTest-backed test executable
-- `linsolve/`, `bc/`, `io/`, `benchmarks/`: scaffolded directories reserved for later milestones
+- `bc/`, `io/`, `benchmarks/`: reserved for later milestones
 
 The technical and roadmap documents live at the repository root and currently act as the primary design references.
 
@@ -156,7 +159,8 @@ The current build produces:
 
 - `solver_core`: a small core library for runtime/build metadata and mesh/field infrastructure
 - `solver_operators`: the discrete-operator library built on top of the core field layer
-- `solver_momentum`: advection, diffusion, CFL, and projection utilities for the current solver path
+- `solver_linsolve`: matrix-free Poisson application plus MGPCG / geometric multigrid pressure solve
+- `solver_momentum`: advection, diffusion, CFL, and projection utilities layered on top of the linsolve path
 - `solver_example`: a smoke-test executable under `build/<profile>/tools/`
 - `solver_tests`: a minimal test executable under `build/<profile>/tests/`
 
@@ -174,7 +178,7 @@ Run the benchmark-profile tests:
 ctest --test-dir build/benchmark --output-on-failure
 ```
 
-Today’s test coverage is still intentionally focused, but it now covers the full Milestone 4 gate. The current test executable checks that:
+Today’s test coverage is still intentionally focused, but it now covers the full Milestone 5 gate. The current test executable checks that:
 
 - the build profile is one of the locked profile names
 - the runtime platform is Apple Silicon
@@ -195,8 +199,11 @@ Today’s test coverage is still intentionally focused, but it now covers the fu
 - the ADI predictor preserves the quiescent state
 - the static-fluid projection path keeps the zero solution unchanged
 - the pure-Neumann projection path removes the pressure null space and restores a divergence-free field
+- the MGPCG solve recovers a known discrete Dirichlet solution to the required relative error
+- the MGPCG solve preserves zero-mean pressure for a pure-Neumann problem
+- the MGPCG residual converges to the required relative tolerance and reports the fixed policy metadata
 
-That is enough for Milestone 4. It is not meant to stand in for the full benchmark and regression suite described in the technical spec.
+That is enough for Milestone 5. It is not meant to stand in for the full benchmark and regression suite described in the technical spec.
 
 ## Profiling
 
@@ -220,7 +227,7 @@ The implementation plan is spelled out in [EXECUTION_ROADMAP_V1.md](EXECUTION_RO
 6. Milestone 5: implement the pressure linear solver system
 7. Milestone 6 and beyond: benchmark validation, boundary-condition generalization, restart/output, verification, profiling, optimization, 3D support, and conditional Metal acceleration
 
-The repository has completed the first five items in that sequence at the reference-implementation level and is set up to move into the dedicated pressure-solver work next.
+The repository has completed the first six items in that sequence at the numerical-core level and is set up to move into the first full simulation milestone next.
 
 The important project rule is simple: **do not advance to the next milestone unless the current validation gate passes**.
 

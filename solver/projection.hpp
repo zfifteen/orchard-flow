@@ -4,6 +4,7 @@
 
 #include <array>
 #include <string>
+#include <vector>
 
 namespace solver {
 
@@ -76,9 +77,19 @@ struct PoissonSolveDiagnostics {
   int iterations = 0;
   double initial_residual_l2 = 0.0;
   double final_residual_l2 = 0.0;
+  double relative_residual = 0.0;
   double removed_rhs_mean = 0.0;
+  int multigrid_levels = 0;
+  int coarse_unknowns = 0;
+  int pre_smoothing_steps = 0;
+  int post_smoothing_steps = 0;
   bool converged = false;
   bool zero_mean_enforced = false;
+  std::string solver = "mgpcg";
+  std::string preconditioner = "geometric_multigrid";
+  std::string cycle = "v_cycle";
+  std::string smoother = "damped_jacobi";
+  std::vector<double> residual_history{};
 };
 
 struct ProjectionDiagnostics {
@@ -110,12 +121,6 @@ void build_pressure_rhs(const VelocityField& predicted_velocity,
                         const BoundaryConditionSet& boundary_conditions,
                         const ProjectionOptions& options,
                         ScalarField& rhs);
-
-PoissonSolveDiagnostics solve_pressure_poisson_reference(
-    const ScalarField& rhs,
-    const PressureBoundarySet& boundary_conditions,
-    const ProjectionOptions& options,
-    PressureField& pressure);
 
 void correct_velocity(const VelocityField& predicted_velocity,
                       const PressureField& pressure,

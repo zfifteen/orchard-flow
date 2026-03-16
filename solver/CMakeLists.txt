@@ -11,4 +11,5 @@ target_include_directories(solver_momentum
 target_link_libraries(solver_momentum
   PUBLIC
     solver_operators
+    solver_linsolve
 )

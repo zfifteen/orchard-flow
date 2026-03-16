@@ -1,3 +1,4 @@
+#include "linsolve/poisson_solver.hpp"
 #include "solver/projection.hpp"
 
 #include "operators/discrete_operators.hpp"
@@ -44,10 +45,6 @@ bool is_dirichlet_velocity_boundary(const BoundaryCondition& condition) {
   return condition.type == PhysicalBoundaryType::no_slip_wall ||
          condition.type == PhysicalBoundaryType::prescribed_velocity ||
          condition.type == PhysicalBoundaryType::symmetry;
-}
-
-bool is_dirichlet_pressure_boundary(const PressureBoundaryCondition& condition) {
-  return condition.type == PressureBoundaryType::dirichlet;
 }
 
 double component_value(const BoundaryCondition& condition, const Axis axis) {
@@ -105,21 +102,6 @@ double active_mean(const StructuredField& field) {
   return sum / static_cast<double>(count);
 }
 
-double subtract_active_mean(StructuredField& field) {
-  const double mean = active_mean(field);
-  const IndexRange3D active = field.layout().active_range();
-
-  for(int k = active.k_begin; k < active.k_end; ++k) {
-    for(int j = active.j_begin; j < active.j_end; ++j) {
-      for(int i = active.i_begin; i < active.i_end; ++i) {
-        field(i, j, k) -= mean;
-      }
-    }
-  }
-
-  return mean;
-}
-
 double active_l2_norm(const StructuredField& field) {
   const IndexRange3D active = field.layout().active_range();
   const std::size_t count = active.extent().cell_count();
@@ -134,22 +116,6 @@ double active_l2_norm(const StructuredField& field) {
   }
 
   return std::sqrt(sum / static_cast<double>(count));
-}
-
-double dot_active(const StructuredField& left, const StructuredField& right) {
-  require_same_layout(left, right, "dot_active");
-  const IndexRange3D active = left.layout().active_range();
-  double sum = 0.0;
-
-  for(int k = active.k_begin; k < active.k_end; ++k) {
-    for(int j = active.j_begin; j < active.j_end; ++j) {
-      for(int i = active.i_begin; i < active.i_end; ++i) {
-        sum += left(i, j, k) * right(i, j, k);
-      }
-    }
-  }
-
-  return sum;
 }
 
 void axpy_active(StructuredField& destination, const StructuredField& source, const double scale) {
@@ -628,29 +594,6 @@ void solve_component_adi(FaceField& field,
   field = working;
 }
 
-void apply_pressure_operator(const PressureField& input,
-                             const PressureBoundarySet& boundary_conditions,
-                             PressureField& output,
-                             const bool enforce_zero_mean) {
-  PressureField working = input;
-  apply_pressure_boundary_conditions(boundary_conditions, working);
-  operators::compute_laplacian(working, output);
-  scale_active(output, -1.0);
-  if(enforce_zero_mean) {
-    subtract_active_mean(output);
-  }
-}
-
-bool pressure_problem_has_null_space(const PressureBoundarySet& boundary_conditions) {
-  for(const PressureBoundaryCondition& condition : boundary_conditions.faces) {
-    if(is_dirichlet_pressure_boundary(condition)) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
 }  // namespace
 
 BoundaryConditionSet BoundaryConditionSet::all(const PhysicalBoundaryType type) {
@@ -785,99 +728,6 @@ void build_pressure_rhs(const VelocityField& predicted_velocity,
   scale_active(rhs, options.density / options.dt);
 }
 
-PoissonSolveDiagnostics solve_pressure_poisson_reference(
-    const ScalarField& rhs,
-    const PressureBoundarySet& boundary_conditions,
-    const ProjectionOptions& options,
-    PressureField& pressure) {
-  if(options.poisson_max_iterations <= 0) {
-    throw std::invalid_argument("solve_pressure_poisson_reference expects iterations > 0");
-  }
-  if(options.poisson_tolerance <= 0.0) {
-    throw std::invalid_argument("solve_pressure_poisson_reference expects tolerance > 0");
-  }
-
-  require_same_layout(rhs, pressure, "solve_pressure_poisson_reference");
-
-  const Grid& grid = pressure.layout().grid();
-  PressureField rhs_field{grid};
-  PressureField residual{grid};
-  PressureField search_direction{grid};
-  PressureField operator_result{grid};
-
-  copy_active(rhs, rhs_field);
-  scale_active(rhs_field, -1.0);
-
-  PoissonSolveDiagnostics diagnostics;
-  diagnostics.zero_mean_enforced = pressure_problem_has_null_space(boundary_conditions);
-  if(diagnostics.zero_mean_enforced) {
-    diagnostics.removed_rhs_mean = subtract_active_mean(rhs_field);
-    subtract_active_mean(pressure);
-  }
-
-  apply_pressure_operator(pressure, boundary_conditions, operator_result, diagnostics.zero_mean_enforced);
-  residual = rhs_field;
-  axpy_active(residual, operator_result, -1.0);
-  if(diagnostics.zero_mean_enforced) {
-    subtract_active_mean(residual);
-  }
-
-  search_direction = residual;
-  diagnostics.initial_residual_l2 = active_l2_norm(residual);
-  diagnostics.final_residual_l2 = diagnostics.initial_residual_l2;
-  if(diagnostics.initial_residual_l2 <= options.poisson_tolerance) {
-    diagnostics.converged = true;
-    apply_pressure_boundary_conditions(boundary_conditions, pressure);
-    return diagnostics;
-  }
-
-  double residual_dot = dot_active(residual, residual);
-  for(int iteration = 0; iteration < options.poisson_max_iterations; ++iteration) {
-    apply_pressure_operator(search_direction, boundary_conditions, operator_result,
-                            diagnostics.zero_mean_enforced);
-    const double search_dot = dot_active(search_direction, operator_result);
-    if(std::abs(search_dot) < kSmallNumber) {
-      break;
-    }
-
-    const double alpha = residual_dot / search_dot;
-    axpy_active(pressure, search_direction, alpha);
-    if(diagnostics.zero_mean_enforced) {
-      subtract_active_mean(pressure);
-    }
-
-    axpy_active(residual, operator_result, -alpha);
-    if(diagnostics.zero_mean_enforced) {
-      subtract_active_mean(residual);
-    }
-
-    diagnostics.iterations = iteration + 1;
-    diagnostics.final_residual_l2 = active_l2_norm(residual);
-    if(diagnostics.final_residual_l2 <= options.poisson_tolerance) {
-      diagnostics.converged = true;
-      break;
-    }
-
-    const double next_residual_dot = dot_active(residual, residual);
-    const double beta = next_residual_dot / residual_dot;
-    const IndexRange3D active = search_direction.layout().active_range();
-    for(int k = active.k_begin; k < active.k_end; ++k) {
-      for(int j = active.j_begin; j < active.j_end; ++j) {
-        for(int i = active.i_begin; i < active.i_end; ++i) {
-          search_direction(i, j, k) = residual(i, j, k) + beta * search_direction(i, j, k);
-        }
-      }
-    }
-    if(diagnostics.zero_mean_enforced) {
-      subtract_active_mean(search_direction);
-    }
-    residual_dot = next_residual_dot;
-  }
-
-  apply_pressure_boundary_conditions(boundary_conditions, pressure);
-  return diagnostics;
-}
-
 void correct_velocity(const VelocityField& predicted_velocity,
                       const PressureField& pressure,
                       const BoundaryConditionSet& boundary_conditions,
@@ -925,7 +775,7 @@ ProjectionDiagnostics project_velocity(const VelocityField& predicted_velocity,
   build_pressure_rhs(working, boundary_conditions, options, rhs);
   diagnostics.rhs_l2 = active_l2_norm(rhs);
   diagnostics.pressure_solve =
-      solve_pressure_poisson_reference(rhs, pressure_boundary_conditions, options, pressure);
+      linsolve::solve_pressure_poisson(rhs, pressure_boundary_conditions, options, pressure);
   correct_velocity(working, pressure, boundary_conditions, options, corrected_velocity);
 
   operators::compute_divergence(corrected_velocity, divergence);

@@ -31,6 +31,9 @@ int main() {
   std::cout << "advection: " << solver::describe(advection_options) << '\n';
   std::cout << "max_cfl: " << cfl.max_cfl << '\n';
   std::cout << "projection_iterations: " << projection.pressure_solve.iterations << '\n';
+  std::cout << "pressure_solver_levels: " << projection.pressure_solve.multigrid_levels << '\n';
+  std::cout << "pressure_solver_relative_residual: " << projection.pressure_solve.relative_residual
+            << '\n';
   std::cout << "projection_divergence_l2_after: " << projection.divergence_l2_after << '\n';
   std::cout << "example_status: ok" << '\n';
 

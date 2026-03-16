@@ -3,6 +3,7 @@
 #include "core/runtime.hpp"
 #include "linsolve/poisson_solver.hpp"
 #include "operators/discrete_operators.hpp"
+#include "solver/lid_driven_cavity.hpp"
 #include "solver/momentum_terms.hpp"
 #include "solver/projection.hpp"
 
@@ -23,6 +24,10 @@ void require(bool condition, const std::string& message) {
 
 double pi() {
   return std::acos(-1.0);
+}
+
+std::string source_path(const std::string& relative_path) {
+  return std::string(SOLVER_SOURCE_DIR) + "/" + relative_path;
 }
 
 double square(const double value) {
@@ -869,6 +874,96 @@ void test_pure_neumann_projection_recovers_zero_mean_pressure() {
           "projection should leave a divergence-free corrected field");
 }
 
+void test_lid_driven_cavity_config_loader_and_bc_subset() {
+  const solver::LidDrivenCavityConfig config = solver::load_lid_driven_cavity_config(
+      source_path("benchmarks/lid_driven_cavity_smoke.cfg"));
+  require(config.nx == 32 && config.ny == 32, "smoke cavity config should load the grid size");
+  require(std::abs(config.reynolds - 100.0) < 1.0e-12, "smoke cavity Reynolds number mismatch");
+  require(!config.validate_reference, "smoke config should skip reference validation");
+
+  const std::string summary = solver::describe(config);
+  require(summary.find("validate_reference=false") != std::string::npos,
+          "config description should report validation mode");
+
+  const solver::BoundaryConditionSet boundary_conditions =
+      solver::make_lid_driven_cavity_boundary_conditions(config);
+  require(boundary_conditions[solver::BoundaryFace::x_min].type ==
+              solver::PhysicalBoundaryType::no_slip_wall,
+          "cavity x_min should remain a no-slip wall");
+  require(boundary_conditions[solver::BoundaryFace::x_max].type ==
+              solver::PhysicalBoundaryType::no_slip_wall,
+          "cavity x_max should remain a no-slip wall");
+  require(boundary_conditions[solver::BoundaryFace::y_min].type ==
+              solver::PhysicalBoundaryType::no_slip_wall,
+          "cavity y_min should remain a no-slip wall");
+  require(boundary_conditions[solver::BoundaryFace::y_max].type ==
+              solver::PhysicalBoundaryType::prescribed_velocity,
+          "cavity lid should be a prescribed velocity boundary");
+  require(std::abs(boundary_conditions[solver::BoundaryFace::y_max].velocity[0] -
+                   config.lid_velocity) <= 1.0e-12,
+          "cavity lid speed mismatch");
+  require(boundary_conditions[solver::BoundaryFace::z_min].type ==
+              solver::PhysicalBoundaryType::symmetry,
+          "2D cavity z_min should map to symmetry");
+  require(boundary_conditions[solver::BoundaryFace::z_max].type ==
+              solver::PhysicalBoundaryType::symmetry,
+          "2D cavity z_max should map to symmetry");
+}
+
+void test_lid_driven_cavity_smoke_run() {
+  const solver::LidDrivenCavityConfig config = solver::load_lid_driven_cavity_config(
+      source_path("benchmarks/lid_driven_cavity_smoke.cfg"));
+  const solver::LidDrivenCavityResult result = solver::run_lid_driven_cavity(config);
+
+  require(result.final_step.step == config.max_steps,
+          "smoke cavity run should consume the fixed short-step budget");
+  require(result.final_step.dt > 0.0, "smoke cavity timestep should be positive");
+  require(result.final_step.max_cfl <= config.cfl_limit + 1.0e-12,
+          "smoke cavity CFL should respect the configured ceiling");
+  require(result.final_step.divergence_l2 <= 1.0e-10,
+          "smoke cavity run should remain divergence controlled");
+  require(result.final_step.pressure_iterations >= 0,
+          "smoke cavity run should report pressure iterations");
+  require(result.validation.reference_dataset.empty(),
+          "smoke cavity run should skip benchmark validation");
+  require(result.extrema.u_vertical_max > 0.0, "smoke cavity lid should induce positive u motion");
+  require(result.extrema.u_vertical_min < 0.0,
+          "smoke cavity recirculation should induce negative u motion");
+}
+
+void test_lid_driven_cavity_reference_validation_gate() {
+  const solver::LidDrivenCavityReference reference = solver::ghia_re100_reference();
+  solver::LidDrivenCavityResult passing{};
+  passing.extrema.u_vertical_max = 0.0;
+  passing.extrema.u_vertical_min = 0.0;
+  passing.extrema.v_horizontal_max = 0.0;
+  passing.extrema.v_horizontal_min = 0.0;
+  passing.u_vertical_centerline.coordinate = {
+      0.4000, reference.u_vertical_min_y, 0.5000, reference.u_vertical_max_y, 0.9900};
+  passing.u_vertical_centerline.value = {
+      -0.1800, reference.u_vertical_min, -0.20581, reference.u_vertical_max, 0.9000};
+  passing.v_horizontal_centerline.coordinate = {
+      0.2000, reference.v_horizontal_max_x, 0.5000, reference.v_horizontal_min_x, 0.9000};
+  passing.v_horizontal_centerline.value = {
+      0.1700, reference.v_horizontal_max, 0.05454, reference.v_horizontal_min, -0.1800};
+  passing.final_step.divergence_l2 = 5.0e-11;
+
+  const solver::LidDrivenCavityValidation validation =
+      solver::validate_lid_driven_cavity_re100(passing);
+  require(validation.pass, "reference-matching cavity result should pass validation");
+  require(validation.reference_dataset == reference.dataset, "wrong reference dataset label");
+  require(std::abs(validation.u_vertical_max_sample - reference.u_vertical_max) <= 1.0e-12,
+          "validation should sample the vertical-max reference point");
+  require(std::abs(validation.v_horizontal_min_sample - reference.v_horizontal_min) <= 1.0e-12,
+          "validation should sample the horizontal-min reference point");
+
+  solver::LidDrivenCavityResult failing = passing;
+  failing.v_horizontal_centerline.value[1] *= 0.97;
+  const solver::LidDrivenCavityValidation failed_validation =
+      solver::validate_lid_driven_cavity_re100(failing);
+  require(!failed_validation.pass, "3 percent extrema drift should fail the 2 percent gate");
+}
+
 }  // namespace
 
 int main() {
@@ -893,6 +988,9 @@ int main() {
     test_bounded_advection_regression_case();
     test_static_projection_preserves_quiescent_fluid();
     test_pure_neumann_projection_recovers_zero_mean_pressure();
+    test_lid_driven_cavity_config_loader_and_bc_subset();
+    test_lid_driven_cavity_smoke_run();
+    test_lid_driven_cavity_reference_validation_gate();
   } catch(const std::exception& exception) {
     std::cerr << "solver_tests failed: " << exception.what() << '\n';
     return 1;

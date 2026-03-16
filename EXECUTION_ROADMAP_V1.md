@@ -45,9 +45,15 @@ CMake configuration
 Compiler flags
 
 ```
--O3
--march=armv8-a
--ffast-math (optional, test impact)
+Deterministic validation profile:
+  -O3
+  -march=armv8-a
+  no -ffast-math
+
+Benchmark profile:
+  -O3
+  -march=armv8-a
+  -ffast-math optional for labeled performance experiments only
 ```
 
 Baseline dependencies
@@ -57,6 +63,7 @@ None beyond:
 * standard library
 * Apple Clang
 * CMake
+* Apple system frameworks as needed for threading / profiling
 
 Profiling tools configured
 
@@ -70,6 +77,7 @@ Profiling tools configured
 * project builds clean
 * unit test framework runs
 * example program executes
+* deterministic and benchmark build profiles are clearly labeled
 
 ---
 
@@ -110,6 +118,19 @@ i + nx*(j + ny*k)
 
 Ghost cell support
 
+Cell / face placement
+
+* pressure at cell centers
+* velocity components at MAC-grid faces
+
+Precision
+
+* `double` for all solution-state storage
+
+Traversal contract
+
+* `i` is unit-stride and the primary vectorization axis
+
 ---
 
 ## Deliverables
@@ -122,6 +143,8 @@ Boundary indexing utilities
 
 Memory alignment checks
 
+Ghost-cell fill helpers
+
 ---
 
 ## Validation Gate
@@ -131,6 +154,8 @@ Tests must verify:
 * indexing correctness
 * ghost cell access
 * memory layout
+* cell-center / face-center placement
+* double-precision storage contract
 
 ---
 
@@ -195,13 +220,21 @@ Compute RHS of momentum equation.
 Term implementations
 
 ```
-(u · ∇)u
+∇·(u u)
 ν∇²u
 ```
 
 Scheme
 
-second-order central differencing.
+bounded second-order TVD flux-limited advection
+
+Default limiter
+
+van Leer
+
+Fallback
+
+first-order upwind for debugging only
 
 ---
 
@@ -212,6 +245,10 @@ Advection kernel
 Diffusion kernel
 
 CFL diagnostic
+
+Scheme-selection configuration
+
+Limiter selection and logging
 
 ---
 
@@ -227,21 +264,31 @@ velocity error
 
 convergence behavior.
 
+No spurious advection oscillations in the bounded-scheme regression case.
+
+Default validation configurations use advective CFL <= 0.5 unless a benchmark
+case explicitly sets a lower value.
+
 ---
 
 # Milestone 4 — Pressure Projection Core
 
 ## Goal
 
-Implement fractional-step incompressible solver.
+Implement second-order semi-implicit incompressible projection.
 
 Algorithm per timestep
 
-1. compute intermediate velocity u*
-2. compute divergence of u*
-3. solve pressure Poisson equation
-4. correct velocity
-5. enforce divergence-free field
+1. assemble explicit Adams-Bashforth advection / forcing terms
+2. solve Crank-Nicolson predictor for u* via ADI Helmholtz solves
+3. compute divergence of u*
+4. solve pressure Poisson equation with BC-consistent RHS
+5. correct velocity and pressure
+6. enforce divergence-free field
+
+Startup rule
+
+timestep 0 uses a Forward Euler bootstrap for the explicit terms before AB2 begins
 
 ---
 
@@ -252,6 +299,12 @@ Projection step implementation.
 Pressure RHS builder.
 
 Velocity correction step.
+
+Pressure BC mapping for each physical boundary type.
+
+Null-space handling for pure-Neumann pressure systems.
+
+ADI Helmholtz predictor solver with deterministic tridiagonal line solves.
 
 ---
 
@@ -267,6 +320,8 @@ Expected result:
 
 velocity remains zero.
 
+Pure-Neumann cavity test must enforce zero-mean pressure and converge.
+
 ---
 
 # Milestone 5 — Linear Solver System
@@ -277,19 +332,21 @@ Solve the pressure Poisson equation efficiently.
 
 Solver
 
-Conjugate Gradient
+MGPCG
 
 Preconditioner
 
-Incomplete Cholesky
+fixed V-cycle geometric multigrid with damped-Jacobi smoothing
 
 ---
 
 ## Deliverables
 
-Sparse matrix representation
+Matrix-free Poisson operator
 
-Matrix-vector product kernel
+Multigrid hierarchy
+
+Documented smoother, cycle schedule, and coarse-grid solve policy
 
 CG iteration loop
 
@@ -305,9 +362,15 @@ Known analytic solution.
 
 Measure:
 
-L2 error
+relative L2 error
 
-residual convergence rate.
+relative residual convergence rate.
+
+Acceptance:
+
+* relative L2 error <= 1e-8
+* relative residual <= 1e-10
+* zero-mean pressure preserved for pure-Neumann cases
 
 ---
 
@@ -316,6 +379,11 @@ residual convergence rate.
 ## Goal
 
 Run full incompressible solver.
+
+Scope note
+
+M6 uses a hardcoded lid-driven cavity boundary-condition subset. M7 extracts this
+into the general reusable boundary-condition system.
 
 Benchmark
 
@@ -339,15 +407,19 @@ Configuration loader
 
 Boundary condition support
 
+Hardcoded cavity BC implementation for the benchmark case
+
 ---
 
 ## Validation Gate
 
 Compare centerline velocity profiles against reference data.
 
-Tolerance threshold defined.
+Tolerance:
 
-Mass conservation must remain stable.
+* centerline velocity extrema within 2 percent of the selected reference data
+
+Mass conservation must remain stable with post-projection divergence L2 <= 1e-10.
 
 ---
 
@@ -357,12 +429,15 @@ Mass conservation must remain stable.
 
 Implement flexible boundary conditions.
 
+This milestone generalizes the cavity-specific BC subset from M6 into the full BC
+system.
+
 Types
 
 * no-slip wall
-* symmetry
-* inflow
-* outflow
+* symmetry / slip
+* prescribed inflow
+* fixed-pressure outflow
 * periodic
 
 ---
@@ -373,13 +448,17 @@ Boundary abstraction
 
 BC application routines
 
+Ghost-cell fill rules
+
+Projection-compatible pressure BC rules
+
 ---
 
 ## Validation Gate
 
 Run Couette and Poiseuille flow tests.
 
-Velocity profiles must match analytic solutions.
+Velocity profiles must match analytic solutions with relative L2 error <= 5e-3.
 
 ---
 
@@ -395,12 +474,18 @@ Checkpoint files contain
 * pressure
 * timestep
 * parameters
+* scalar precision metadata
+* format version
+* checksum
+* build / configuration hash
 
 ---
 
 ## Deliverables
 
-Binary checkpoint format
+Versioned little-endian binary checkpoint format
+
+Checksum verification
 
 Restart loader
 
@@ -422,7 +507,7 @@ restart
 
 Compare against uninterrupted run.
 
-Results must match.
+Results must match bitwise in the deterministic build profile.
 
 ---
 
@@ -440,6 +525,8 @@ Time-step refinement
 
 Mass conservation monitoring
 
+Reference-data comparison for lid-driven cavity
+
 ---
 
 ## Deliverables
@@ -450,11 +537,15 @@ Error plots.
 
 Convergence tables.
 
+Named quantitative thresholds for every benchmark.
+
 ---
 
 ## Validation Gate
 
-Observed order of convergence must match theoretical order.
+Observed order of convergence must be at least 1.8 where second-order accuracy is expected.
+
+All benchmark thresholds from the technical specification must pass.
 
 ---
 
@@ -474,6 +565,10 @@ memory bandwidth
 
 thread scaling
 
+performance-core-only vs mixed P/E execution
+
+QoS mode impact
+
 ---
 
 ## Deliverables
@@ -486,11 +581,15 @@ scaling curves
 
 memory usage
 
+recommended default thread / QoS policy
+
 ---
 
 ## Validation Gate
 
 Performance bottlenecks identified with evidence.
+
+Default execution mode selected from measured data, not assumption.
 
 ---
 
@@ -504,11 +603,13 @@ Possible improvements
 
 loop blocking
 
-SIMD vectorization
+SIMD vectorization along `i`
 
 thread scheduling tuning
 
 memory layout improvements
+
+Apple Accelerate evaluation where appropriate
 
 ---
 
@@ -523,6 +624,8 @@ before/after benchmarks
 ## Validation Gate
 
 measurable improvement in throughput.
+
+No regression in deterministic validation results.
 
 ---
 
@@ -542,6 +645,8 @@ Extend solver to full 3D.
 
 3D Poisson solve
 
+validated 256^3 execution path
+
 ---
 
 ## Validation Gate
@@ -549,6 +654,8 @@ Extend solver to full 3D.
 3D Taylor-Green vortex.
 
 Correct energy decay.
+
+512^3 remains a stretch target until profiling and optimization gates pass.
 
 ---
 
@@ -568,7 +675,7 @@ stencil updates
 
 Metal compute kernels
 
-CPU fallback removed (M1-only still satisfied).
+CPU fallback retained for validation and reproducibility comparison.
 
 ---
 
@@ -596,6 +703,10 @@ deterministic reductions
 
 regression tests
 
+checkpoint compatibility tests
+
+benchmark-threshold enforcement in CI
+
 ---
 
 ## Deliverables
@@ -621,6 +732,8 @@ performance report
 reproducible test suite
 
 restartable simulations
+
+documented deterministic build and run procedure
 
 ---
 

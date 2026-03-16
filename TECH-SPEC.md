@@ -52,7 +52,7 @@ Continuity equation:
 
 Momentum equation:
 
-∂u/∂t + (u·∇)u = −∇p/ρ + ν∇²u + f
+∂u/∂t + ∇·(u⊗u) = −∇p/ρ + ν∇²u + f
 
 Where:
 
@@ -61,6 +61,11 @@ p : pressure
 ρ : density (constant)
 ν : kinematic viscosity
 f : body forces
+
+For constant density incompressible flow, the conservative convective form above is
+analytically equivalent to (u·∇)u when ∇·u = 0. The v1 finite-volume
+discretization uses the conservative form so that face-flux balances remain
+discretely conservative before projection.
 
 ---
 
@@ -111,12 +116,18 @@ Operators:
 Gradient
 Divergence
 Laplacian
+Convective flux divergence
 
 Schemes:
 
 Advection term
 
-* second-order central differencing initially
+* conservative divergence form ∇·(u⊗u)
+* bounded second-order TVD flux-limited face-flux scheme
+* default limiter: van Leer
+* limiter choice must be configurable and logged
+* first-order upwind mode permitted only as a debugging fallback
+* pure central differencing is not an accepted production default
 
 Diffusion term
 
@@ -126,18 +137,41 @@ Pressure gradient
 
 * central difference
 
+Interpolation between cell centers and faces must be second-order consistent with
+the MAC grid arrangement.
+
 ---
 
 ## Time Integration
 
-Semi-implicit fractional step method.
+Second-order semi-implicit incremental pressure-correction method.
+
+Term treatment:
+
+* advection: explicit Adams-Bashforth 2
+* diffusion: implicit Crank-Nicolson
+* pressure: projection every timestep
+* timestep control: fixed Δt in v1; adaptive time stepping is out of scope
+* AB2 startup: timestep 0 uses a Forward Euler bootstrap for the explicit terms,
+  then switches to AB2 from timestep 1 onward
+* Crank-Nicolson diffusion solve: ADI factorization of the structured-grid
+  Helmholtz operator with deterministic tridiagonal line solves
+
+Timestep selection must satisfy a configured advective CFL limit and the selected
+Δt must be logged for every run.
+
+Validation-harness default:
+
+* advective CFL <= 0.5 unless a benchmark definition explicitly requires a lower
+  value
 
 Steps per timestep:
 
-1. compute intermediate velocity u*
-2. solve pressure Poisson equation
-3. correct velocity
-4. enforce divergence-free field
+1. assemble explicit convective and body-force terms
+2. solve the implicit predictor for intermediate velocity u*
+3. solve the pressure Poisson equation with BC-consistent RHS
+4. correct velocity and pressure
+5. enforce divergence-free velocity and log post-projection norms
 
 ---
 
@@ -145,7 +179,7 @@ Steps per timestep:
 
 Method:
 
-Projection method (fractional step)
+Incremental projection method (fractional step)
 
 Pressure Poisson equation:
 
@@ -153,26 +187,57 @@ Pressure Poisson equation:
 
 Pressure solve occurs each timestep.
 
+Pressure boundary-condition rules:
+
+* no-slip walls, symmetry planes, and prescribed-velocity inflows use pressure
+  Neumann conditions derived from the normal momentum balance
+* prescribed-pressure outlets use pressure Dirichlet conditions
+* periodic boundaries remain periodic for both pressure and velocity
+* closed domains with only Neumann pressure boundaries enforce solvability by
+  removing the mean of the Poisson RHS and solving with a zero-mean pressure
+  constraint
+
+The projection implementation must apply boundary conditions and null-space
+treatment consistently in the predictor, Poisson RHS assembly, and velocity
+correction steps.
+
 ---
 
 # 6. Linear Solvers
 
 Primary solver:
 
-Conjugate Gradient (CG)
+Geometric multigrid-preconditioned Conjugate Gradient (MGPCG)
 
 Preconditioner:
 
-Incomplete Cholesky (IC)
+Fixed V-cycle geometric multigrid with damped-Jacobi smoothing
 
 Reason:
 
-* robust for Poisson systems
-* predictable convergence
+* scalable for large structured Poisson systems
+* compatible with CPU multithreading
+* required to support the 3D target domain sizes
 
-Future extension:
+Implementation requirements:
 
-Multigrid
+* matrix-free structured-grid stencil operator
+* damped-Jacobi smoother as the deterministic default
+* fixed V-cycle schedule
+* deterministic residual and dot-product reductions
+* direct coarse-grid solve on the coarsest level
+* reference plain CG permitted only for small test problems
+
+Predictor diffusion solver requirements:
+
+* the Crank-Nicolson predictor Helmholtz systems use ADI splitting on the
+  structured grid
+* each ADI substep uses deterministic tridiagonal line solves
+* predictor-solve tolerances and iteration structure must be identical across
+  deterministic reruns
+
+Incomplete Cholesky is out of scope for v1 because it conflicts with the parallel
+execution strategy.
 
 ---
 
@@ -180,9 +245,9 @@ Multigrid
 
 Supported boundary conditions:
 
-Velocity Dirichlet (no-slip walls)
+Velocity Dirichlet (no-slip walls, prescribed inflow)
 
-Velocity Neumann (symmetry)
+Velocity symmetry / slip
 
 Pressure Neumann
 
@@ -190,13 +255,31 @@ Pressure Dirichlet (outlet)
 
 Periodic boundaries
 
-Boundary conditions must be validated with dedicated tests.
+Ghost-cell convention:
+
+* one ghost-cell layer minimum around every field
+* pressure stored at cell centers
+* velocity components stored on faces of the MAC grid
+* wall-normal velocity imposed directly at boundary faces
+* tangential wall velocities filled through ghost values consistent with no-slip
+  or symmetry constraints
+* pressure ghost values filled from the prescribed Dirichlet value or the
+  BC-specific normal derivative
+
+Boundary conditions must be defined as a complete mapping from physical BC to:
+
+* velocity value/gradient treatment
+* pressure value/gradient treatment
+* ghost-cell fill rule
+* projection correction rule
+
+All boundary conditions must be validated with dedicated tests.
 
 ---
 
 # 8. Data Structures
 
-Memory layout must be **cache-friendly and contiguous**.
+Memory layout must be **cache-friendly, contiguous, and deterministic**.
 
 Field storage:
 
@@ -210,13 +293,26 @@ pressure[nx][ny][nz]
 
 All arrays stored as **flat contiguous buffers**.
 
+Precision policy:
+
+* all solution state is stored in `double`
+* pressure-solver residuals, dot products, and norms are accumulated in `double`
+* mixed-precision production paths are out of scope for v1 reference results
+
 Example:
 
-float *velocity_x
+double *velocity_x
 
 Index mapping:
 
 i + nx*(j + ny*k)
+
+Layout requirements:
+
+* the `i` dimension is unit-stride and is the primary SIMD/vectorization axis
+* loop nests must traverse `i` in the innermost position unless profiling proves
+  another order is superior
+* ghost-cell storage is part of each field allocation, not a side structure
 
 ---
 
@@ -228,11 +324,16 @@ CPU multithreading
 
 Threading approach:
 
-* static domain decomposition
-* thread-local work partitions
-* minimal synchronization
+* fixed-size worker pool
+* deterministic domain decomposition with fixed reduction trees
+* performance-core-first execution by default
+* mixed performance/efficiency-core execution allowed only with explicit weighted
+  partitions and profiling evidence
+* minimal synchronization at timestep phase boundaries
 
 Thread counts must be configurable.
+
+Thread QoS class must be configurable and recorded in logs and checkpoints.
 
 Scaling must be tested across:
 
@@ -247,11 +348,19 @@ Optimization targets:
 
 Memory bandwidth utilization
 
-Cache locality
+Cache locality with unit-stride `i` sweeps
 
 Thread scheduling across Apple core topology
 
 SIMD vectorization via ARM NEON where beneficial.
+
+Platform-specific execution rules:
+
+* compute threads must run at an explicit QoS class
+* the default benchmark and production profile uses `QOS_CLASS_USER_INITIATED`
+* reports must state whether a run used performance-core-only or mixed P/E mode
+* Apple Accelerate / vecLib may be used for BLAS-like kernels if validation and
+  deterministic-build requirements remain satisfied
 
 Profiling tools:
 
@@ -291,11 +400,17 @@ grid resolution
 
 time step
 
+time integration scheme
+
+advection scheme / limiter mode
+
 Reynolds number
 
 boundary conditions
 
 solver tolerances
+
+thread count and QoS mode
 
 checkpoint frequency
 
@@ -329,7 +444,23 @@ time step index
 
 simulation parameters
 
-Restart must reproduce identical continuation behavior.
+scalar precision metadata
+
+format version
+
+integrity checksum
+
+build / configuration hash
+
+Binary checkpoint requirements:
+
+* explicit versioned format
+* defined little-endian encoding
+* checksum verification before restart
+* forward-compatible handling of added metadata fields
+
+Restart must reproduce identical continuation behavior in the deterministic build
+profile when executable, thread configuration, and input configuration match.
 
 ---
 
@@ -345,7 +476,17 @@ divergence norm
 
 pressure solver iterations
 
+multigrid cycles
+
+pressure null-space correction status
+
 CFL number
+
+active advection scheme
+
+active limiter
+
+thread count and QoS mode
 
 Logging levels:
 
@@ -383,21 +524,40 @@ divergence magnitude
 
 observed order of convergence
 
+kinetic energy error for unsteady benchmarks
+
+All acceptance thresholds in section 17 are normative.
+
 ---
 
 # 17. Verification Requirements
 
 The solver must pass:
 
-Grid refinement study
+* Manufactured solution: observed spatial order >= 1.8 for gradient,
+  divergence, and Laplacian under uniform 2x mesh refinement.
+* Time-step convergence: observed temporal order >= 1.8 on the selected
+  second-order time integrator.
+* Couette flow: relative L2 velocity-profile error <= 5e-3 on the reference
+  128 x 128 case.
+* Plane Poiseuille flow: relative L2 velocity-profile error <= 5e-3 on the
+  reference 128 x 128 case.
+* Lid-driven cavity, Re = 100, 128 x 128: centerline velocity extrema must
+  match the selected reference dataset within 2 percent.
+* Taylor-Green vortex: normalized kinetic-energy error <= 1 percent over the
+  benchmark time horizon.
+* Poisson analytic solve: relative L2 pressure error <= 1e-8 and relative
+  residual <= 1e-10 in double precision.
+* Mass conservation: post-projection divergence L2 norm <= 1e-10 on 2D
+  reference cases.
+* Restart reproducibility: restarted and uninterrupted deterministic-profile
+  runs must match bitwise.
 
-Time-step convergence
+Each benchmark case must name its reference dataset, norm definition, sample
+times, and grid / timestep parameters in the validation harness.
 
-Mass conservation verification
-
-Poisson residual convergence
-
-Acceptance thresholds must be defined for each test.
+Unless a benchmark definition explicitly overrides it, the validation harness must
+use the default advective CFL ceiling defined in section 4.
 
 ---
 
@@ -425,11 +585,14 @@ output reproducibility
 
 Target domain sizes:
 
-2D: up to 4096 × 4096
+2D validated target: up to 4096 × 4096
 
-3D: up to 512³
+3D validated target: up to 256³
 
-Pressure solver must converge within defined tolerance.
+3D stretch target: 512³ after multigrid, profiling, and optimization gates pass
+
+Pressure solver must converge to a relative residual of at least 1e-10, or to a
+stricter case-specific tolerance if required by validation.
 
 Simulation throughput must be measured in:
 
@@ -493,6 +656,13 @@ vectorization enabled
 
 debug symbol generation in development builds
 
+Build profiles:
+
+* deterministic validation profile: no `-ffast-math`; stable floating-point
+  semantics required
+* benchmark profile: `-O3`; `-ffast-math` allowed only for clearly labeled
+  performance experiments and never for reference-result generation
+
 ---
 
 # 22. Determinism
@@ -501,11 +671,20 @@ Solver must produce deterministic output when run with identical configuration.
 
 Sources of nondeterminism must be controlled:
 
-thread scheduling
+* thread count
+* QoS class
+* domain partitioning
+* floating-point reductions
+* random seeds
+* restart metadata / build configuration
 
-floating-point reductions
+Deterministic execution requirements:
 
-random seeds
+* fixed reduction order for dot products, norms, and global diagnostics
+* no schedule-dependent atomics in the numerical path
+* deterministic build profile is the source of truth for validation and restart
+  equivalence
+* any non-deterministic benchmark profile must be clearly labeled as such
 
 ---
 
@@ -541,9 +720,13 @@ moving meshes
 
 adaptive mesh refinement
 
+adaptive time stepping
+
 unstructured meshes
 
 GPU-first execution
+
+mixed-precision production solves
 
 These may be added only after the core solver is validated.
 
@@ -553,17 +736,19 @@ These may be added only after the core solver is validated.
 
 The solver is considered production-grade when it:
 
-produces correct benchmark results
+meets all quantitative validation thresholds
 
-demonstrates numerical convergence
+demonstrates the expected spatial and temporal convergence
 
 runs stable long simulations
 
-restarts correctly from checkpoints
+restarts correctly from versioned checkpoints
 
-passes regression tests
+passes deterministic regression tests
 
 operates efficiently on Apple M1 Max
+
+documents benchmark references, build modes, and known limitations
 
 is understandable and maintainable by new engineers
 

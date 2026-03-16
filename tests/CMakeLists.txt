@@ -4,7 +4,7 @@ add_executable(solver_tests
 
 target_link_libraries(solver_tests
   PRIVATE
-    solver_operators
+    solver_momentum
 )
 
 add_test(NAME solver_tests COMMAND solver_tests)

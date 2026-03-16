@@ -4,6 +4,5 @@ add_executable(solver_example
 
 target_link_libraries(solver_example
   PRIVATE
-    solver_core
+    solver_momentum
 )
-

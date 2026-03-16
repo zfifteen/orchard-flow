@@ -2,6 +2,7 @@
 #include "core/grid.hpp"
 #include "core/runtime.hpp"
 #include "operators/discrete_operators.hpp"
+#include "solver/momentum_terms.hpp"
 
 #include <cmath>
 #include <exception>
@@ -65,6 +66,83 @@ double active_l2_error(const Field& field, ValueFn&& exact_value) {
 
 double observed_order(const double coarse_error, const double fine_error) {
   return std::log(coarse_error / fine_error) / std::log(2.0);
+}
+
+double wrap_periodic(const double coordinate, const double period) {
+  const double wrapped = std::fmod(coordinate, period);
+  return wrapped < 0.0 ? wrapped + period : wrapped;
+}
+
+double kinetic_energy(const solver::VelocityField& velocity) {
+  const solver::Grid& grid = velocity.x.layout().grid();
+  const solver::IndexRange3D cells = solver::FieldLayout::cell_centered(grid).active_range();
+  double energy_sum = 0.0;
+  std::size_t count = 0;
+
+  for(int k = cells.k_begin; k < cells.k_end; ++k) {
+    for(int j = cells.j_begin; j < cells.j_end; ++j) {
+      for(int i = cells.i_begin; i < cells.i_end; ++i) {
+        const double u_center = 0.5 * (velocity.x(i, j, k) + velocity.x(i + 1, j, k));
+        const double v_center = 0.5 * (velocity.y(i, j, k) + velocity.y(i, j + 1, k));
+        const double w_center = 0.5 * (velocity.z(i, j, k) + velocity.z(i, j, k + 1));
+        energy_sum += 0.5 * (square(u_center) + square(v_center) + square(w_center));
+        ++count;
+      }
+    }
+  }
+
+  return energy_sum / static_cast<double>(count);
+}
+
+double active_min(const solver::StructuredField& field) {
+  const solver::IndexRange3D active = field.layout().active_range();
+  double value = field(active.i_begin, active.j_begin, active.k_begin);
+
+  for(int k = active.k_begin; k < active.k_end; ++k) {
+    for(int j = active.j_begin; j < active.j_end; ++j) {
+      for(int i = active.i_begin; i < active.i_end; ++i) {
+        value = std::min(value, field(i, j, k));
+      }
+    }
+  }
+
+  return value;
+}
+
+double active_max(const solver::StructuredField& field) {
+  const solver::IndexRange3D active = field.layout().active_range();
+  double value = field(active.i_begin, active.j_begin, active.k_begin);
+
+  for(int k = active.k_begin; k < active.k_end; ++k) {
+    for(int j = active.j_begin; j < active.j_end; ++j) {
+      for(int i = active.i_begin; i < active.i_end; ++i) {
+        value = std::max(value, field(i, j, k));
+      }
+    }
+  }
+
+  return value;
+}
+
+template <typename Field>
+void axpy_active(Field& destination, const Field& source, const double scale) {
+  const solver::IndexRange3D active = destination.layout().active_range();
+
+  for(int k = active.k_begin; k < active.k_end; ++k) {
+    for(int j = active.j_begin; j < active.j_end; ++j) {
+      for(int i = active.i_begin; i < active.i_end; ++i) {
+        destination(i, j, k) += scale * source(i, j, k);
+      }
+    }
+  }
+}
+
+void axpy_velocity(solver::VelocityField& destination,
+                   const solver::VelocityField& source,
+                   const double scale) {
+  axpy_active(destination.x, source.x, scale);
+  axpy_active(destination.y, source.y, scale);
+  axpy_active(destination.z, source.z, scale);
 }
 
 void test_build_profile_is_locked() {
@@ -193,6 +271,30 @@ void test_double_precision_storage_contract() {
   require(sizeof(*pressure.data()) == sizeof(double), "unexpected pressure storage precision");
 }
 
+void test_advection_options_and_cfl_diagnostic() {
+  const solver::AdvectionOptions options{};
+  require(solver::to_string(options.scheme) == "tvd", "wrong default advection scheme label");
+  require(solver::to_string(options.limiter) == "van_leer", "wrong default limiter label");
+  require(solver::describe(options).find("scheme=tvd") != std::string::npos,
+          "missing scheme description");
+  require(solver::describe(options).find("limiter=van_leer") != std::string::npos,
+          "missing limiter description");
+
+  const solver::Grid grid{8, 4, 1, 0.25, 0.5, 1.0, 1};
+  solver::VelocityField velocity{grid};
+  fill_storage(velocity.x, [](double, double, double) { return 2.0; });
+  fill_storage(velocity.y, [](double, double, double) { return -1.0; });
+  fill_storage(velocity.z, [](double, double, double) { return 0.0; });
+
+  const double dt = 0.05;
+  const solver::CflDiagnostics diagnostics = solver::compute_advective_cfl(velocity, dt);
+  require(std::abs(diagnostics.max_u - 2.0) < 1.0e-12, "wrong max u in CFL diagnostic");
+  require(std::abs(diagnostics.max_v - 1.0) < 1.0e-12, "wrong max v in CFL diagnostic");
+  require(std::abs(diagnostics.max_w) < 1.0e-12, "wrong max w in CFL diagnostic");
+  require(std::abs(diagnostics.max_cfl - dt * (2.0 / 0.25 + 1.0 / 0.5)) < 1.0e-12,
+          "wrong CFL value");
+}
+
 struct ManufacturedErrors {
   double gradient;
   double divergence;
@@ -264,6 +366,150 @@ void test_manufactured_solution_convergence() {
           "laplacian convergence order below second-order target");
 }
 
+void test_diffusion_term_matches_scaled_laplacian() {
+  const double domain_length = 2.0 * pi();
+  const int resolution = 32;
+  const double spacing = domain_length / static_cast<double>(resolution);
+  const solver::Grid grid{resolution, resolution, 1, spacing, spacing, 1.0, 1};
+  const double viscosity = 0.125;
+
+  solver::VelocityField velocity{grid};
+  solver::VelocityField diffusion{grid};
+
+  fill_storage(velocity.x, [](const double x, const double y, double) {
+    return -std::cos(x) * std::sin(y);
+  });
+  fill_storage(velocity.y, [](const double x, const double y, double) {
+    return std::sin(x) * std::cos(y);
+  });
+  fill_storage(velocity.z, [](double, double, double) {
+    return 0.0;
+  });
+
+  solver::compute_diffusion_term(velocity, viscosity, diffusion);
+
+  const double u_error = active_l2_error(diffusion.x, [viscosity](const double x, const double y, double) {
+    return 2.0 * viscosity * std::cos(x) * std::sin(y);
+  });
+  const double v_error = active_l2_error(diffusion.y, [viscosity](const double x, const double y, double) {
+    return -2.0 * viscosity * std::sin(x) * std::cos(y);
+  });
+
+  require(u_error < 2.0e-2, "diffusion u error too large");
+  require(v_error < 2.0e-2, "diffusion v error too large");
+}
+
+struct TaylorGreenStepErrors {
+  double velocity_error;
+  double energy_error;
+};
+
+TaylorGreenStepErrors run_taylor_green_step_case(const int resolution) {
+  const double domain_length = 2.0 * pi();
+  const double viscosity = 0.01;
+  const double spacing = domain_length / static_cast<double>(resolution);
+  const solver::Grid grid{resolution, resolution, 1, spacing, spacing, 1.0, 1};
+  const double dt = 0.1 * spacing * spacing;
+  const solver::AdvectionOptions options{};
+
+  solver::VelocityField velocity{grid};
+  solver::VelocityField advection{grid};
+  solver::VelocityField diffusion{grid};
+  solver::VelocityField pressure_gradient{grid};
+  solver::VelocityField updated_velocity{grid};
+  solver::PressureField pressure{grid};
+
+  fill_storage(velocity.x, [](const double x, const double y, double) {
+    return -std::cos(x) * std::sin(y);
+  });
+  fill_storage(velocity.y, [](const double x, const double y, double) {
+    return std::sin(x) * std::cos(y);
+  });
+  fill_storage(velocity.z, [](double, double, double) {
+    return 0.0;
+  });
+  fill_storage(pressure, [](const double x, const double y, double) {
+    return -0.25 * (std::cos(2.0 * x) + std::cos(2.0 * y));
+  });
+
+  updated_velocity = velocity;
+
+  solver::compute_advection_term(velocity, options, advection);
+  solver::compute_diffusion_term(velocity, viscosity, diffusion);
+  solver::operators::compute_gradient(pressure, pressure_gradient);
+
+  axpy_velocity(updated_velocity, advection, -dt);
+  axpy_velocity(updated_velocity, pressure_gradient, -dt);
+  axpy_velocity(updated_velocity, diffusion, dt);
+
+  const double decay_velocity = std::exp(-2.0 * viscosity * dt);
+  const double exact_energy = 0.25 * std::exp(-4.0 * viscosity * dt);
+  const double numerical_energy = kinetic_energy(updated_velocity);
+
+  const double u_error = active_l2_error(updated_velocity.x, [decay_velocity](const double x,
+                                                                              const double y,
+                                                                              double) {
+    return -std::cos(x) * std::sin(y) * decay_velocity;
+  });
+  const double v_error = active_l2_error(updated_velocity.y, [decay_velocity](const double x,
+                                                                              const double y,
+                                                                              double) {
+    return std::sin(x) * std::cos(y) * decay_velocity;
+  });
+
+  return TaylorGreenStepErrors{
+      .velocity_error = std::sqrt(0.5 * (square(u_error) + square(v_error))),
+      .energy_error = std::abs(numerical_energy - exact_energy),
+  };
+}
+
+void test_taylor_green_step_behavior() {
+  const TaylorGreenStepErrors coarse = run_taylor_green_step_case(16);
+  const TaylorGreenStepErrors fine = run_taylor_green_step_case(32);
+
+  require(coarse.velocity_error > fine.velocity_error,
+          "Taylor-Green velocity error did not decrease on refinement");
+  require(coarse.energy_error > fine.energy_error,
+          "Taylor-Green energy error did not decrease on refinement");
+  require(observed_order(coarse.velocity_error, fine.velocity_error) >= 1.5,
+          "Taylor-Green velocity error did not show expected convergence");
+  require(observed_order(coarse.energy_error, fine.energy_error) >= 1.5,
+          "Taylor-Green energy error did not show expected convergence");
+}
+
+void test_bounded_advection_regression_case() {
+  const int resolution_x = 64;
+  const int resolution_y = 16;
+  const double length = 1.0;
+  const double dx = length / static_cast<double>(resolution_x);
+  const double dy = length / static_cast<double>(resolution_y);
+  const solver::Grid grid{resolution_x, resolution_y, 1, dx, dy, 1.0, 1};
+
+  solver::VelocityField velocity{grid};
+  solver::VelocityField advection{grid};
+  solver::VelocityField updated{grid};
+  solver::AdvectionOptions options{};
+  const double dt = 0.4 * dx;
+
+  fill_storage(velocity.x, [](double, double, double) {
+    return 1.0;
+  });
+  fill_storage(velocity.y, [](double, double, double) {
+    return 0.0;
+  });
+  fill_storage(velocity.z, [length](const double x, double, double) {
+    const double wrapped_x = wrap_periodic(x, length);
+    return wrapped_x < 0.5 ? 1.0 : 0.0;
+  });
+
+  updated = velocity;
+  solver::compute_advection_term(velocity, options, advection);
+  axpy_active(updated.z, advection.z, -dt);
+
+  require(active_min(updated.z) >= -1.0e-12, "bounded TVD update undershot the minimum");
+  require(active_max(updated.z) <= 1.0 + 1.0e-12, "bounded TVD update overshot the maximum");
+}
+
 }  // namespace
 
 int main() {
@@ -277,7 +523,11 @@ int main() {
     test_memory_layout_and_alignment();
     test_cell_and_face_placement();
     test_double_precision_storage_contract();
+    test_advection_options_and_cfl_diagnostic();
     test_manufactured_solution_convergence();
+    test_diffusion_term_matches_scaled_laplacian();
+    test_taylor_green_step_behavior();
+    test_bounded_advection_regression_case();
   } catch(const std::exception& exception) {
     std::cerr << "solver_tests failed: " << exception.what() << '\n';
     return 1;

@@ -6,11 +6,11 @@ That combination matters here. A lot of scientific software grows by accumulatin
 
 Right now, the repository is still early. It does not yet contain the full Navier-Stokes timestepper described in the technical spec. What it does contain is the locked-down foundation for that system: the build environment, the project structure, the profile split between validation and benchmarking, the structured-grid and field-storage layer, the first discrete operators, a smoke-test executable, a focused test harness, and a tiny profiling helper. In other words, this repo is already opinionated about how the solver should be built and verified before the time-integration and linear-solver machinery arrives.
 
-If you are reading this as a developer, the shortest useful summary is: this project is building toward a production-grade, Apple-Silicon-native incompressible flow solver, and the repository currently reflects Milestone 2 of that plan.
+If you are reading this as a developer, the shortest useful summary is: this project is building toward a production-grade, Apple-Silicon-native incompressible flow solver, and the repository currently reflects Milestone 3 of that plan.
 
 ## Current Status
 
-The repository is currently at **Milestone 2: Discrete Operators**.
+The repository is currently at **Milestone 3: Advection and Diffusion**.
 
 Implemented today:
 
@@ -22,6 +22,9 @@ Implemented today:
 - boundary slab and ghost-layer helpers for future BC work
 - second-order discrete `gradient`, `divergence`, and `laplacian` operators
 - manufactured-solution convergence checks for the operator layer
+- transport-term kernels for advection and diffusion
+- CFL diagnostics plus explicit advection-scheme and limiter configuration
+- bounded TVD advection with `van Leer` and a first-order upwind fallback
 - a smoke-test executable that reports build/runtime metadata
 - a minimal test executable wired into CTest
 - a simple time-based profiling helper script
@@ -29,9 +32,13 @@ Implemented today:
 
 What is not implemented yet:
 
-- advection, diffusion, and projection steps
+- full timestep assembly and projection steps
 - Poisson / multigrid solver infrastructure
 - checkpointing, benchmark cases, and validation harnesses beyond the current infrastructure tests
+
+Current implementation note:
+
+- the Milestone 3 advection kernel currently supports the planned 2D path; the broader 3D extension still belongs to the later roadmap milestones
 
 ## Project Goals
 
@@ -81,7 +88,7 @@ The full solver architecture is described in [TECH-SPEC.md](TECH-SPEC.md), but t
 - precision policy: `double` for solution state and pressure-solver reductions
 - validation default: advective CFL `<= 0.5` unless a benchmark case says otherwise
 
-Parts of that numerical path are now implemented at the operator layer, and the rest remains the governing design contract for the upcoming milestones.
+Parts of that numerical path are now implemented at the operator and transport-term layers, and the rest remains the governing design contract for the upcoming milestones.
 
 ## Repository Layout
 
@@ -104,9 +111,10 @@ What those directories mean in practice right now:
 
 - `core/`: runtime/build metadata plus the first structured-grid and field-storage layer
 - `operators/`: second-order structured-grid discrete operators
+- `solver/`: transport-term kernels and CFL diagnostics for the momentum RHS path
 - `tools/`: the smoke-test executable and profiling helper
 - `tests/`: the minimal CTest-backed test executable
-- `solver/`, `linsolve/`, `bc/`, `io/`, `benchmarks/`: scaffolded directories reserved for later milestones
+- `linsolve/`, `bc/`, `io/`, `benchmarks/`: scaffolded directories reserved for later milestones
 
 The technical and roadmap documents live at the repository root and currently act as the primary design references.
 
@@ -144,6 +152,7 @@ The current build produces:
 
 - `solver_core`: a small core library for runtime/build metadata and mesh/field infrastructure
 - `solver_operators`: the discrete-operator library built on top of the core field layer
+- `solver_momentum`: advection, diffusion, and CFL utilities for the momentum RHS path
 - `solver_example`: a smoke-test executable under `build/<profile>/tools/`
 - `solver_tests`: a minimal test executable under `build/<profile>/tests/`
 
@@ -161,7 +170,7 @@ Run the benchmark-profile tests:
 ctest --test-dir build/benchmark --output-on-failure
 ```
 
-Today’s test coverage is still intentionally focused, but it now covers the full Milestone 2 gate. The current test executable checks that:
+Today’s test coverage is still intentionally focused, but it now covers the full Milestone 3 gate. The current test executable checks that:
 
 - the build profile is one of the locked profile names
 - the runtime platform is Apple Silicon
@@ -174,8 +183,12 @@ Today’s test coverage is still intentionally focused, but it now covers the fu
 - field storage uses `double`
 - manufactured-solution error norms for gradient, divergence, and Laplacian decrease under refinement
 - observed operator convergence is at least second-order in the Milestone 2 validation case
+- diffusion matches the expected scaled Laplacian behavior on a smooth field
+- Taylor-Green step behavior improves under refinement
+- the bounded TVD advection regression case avoids overshoot and undershoot
+- CFL diagnostics and advection-config labels report the expected values
 
-That is enough for Milestone 2. It is not meant to stand in for the full benchmark and regression suite described in the technical spec.
+That is enough for Milestone 3. It is not meant to stand in for the full benchmark and regression suite described in the technical spec.
 
 ## Profiling
 
@@ -199,7 +212,7 @@ The implementation plan is spelled out in [EXECUTION_ROADMAP_V1.md](EXECUTION_RO
 6. Milestone 5: implement the pressure linear solver system
 7. Milestone 6 and beyond: benchmark validation, boundary-condition generalization, restart/output, verification, profiling, optimization, 3D support, and conditional Metal acceleration
 
-The repository has completed the first three items in that sequence and is set up to move into advection and diffusion work next.
+The repository has completed the first four items in that sequence and is set up to move into projection and pressure-coupling work next.
 
 The important project rule is simple: **do not advance to the next milestone unless the current validation gate passes**.
 

@@ -82,5 +82,6 @@ message(STATUS "  -ffast-math: ${SOLVER_HAS_FAST_MATH}")
 
 add_subdirectory(core)
 add_subdirectory(operators)
+add_subdirectory(solver)
 add_subdirectory(tools)
 add_subdirectory(tests)

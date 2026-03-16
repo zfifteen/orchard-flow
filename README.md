@@ -6,28 +6,31 @@ That combination matters here. A lot of scientific software grows by accumulatin
 
 Right now, the repository is still early. It does not yet contain the Navier-Stokes machinery described in the technical spec. What it does contain is the first locked-down layer of that system: the build environment, the project structure, the profile split between validation and benchmarking, a smoke-test executable, a minimal test harness, and a tiny profiling helper. In other words, this repo is already opinionated about how the solver should be built and verified, even before the mesh, fields, operators, and solvers arrive.
 
-If you are reading this as a developer, the shortest useful summary is: this project is building toward a production-grade, Apple-Silicon-native incompressible flow solver, and the repository currently reflects Milestone 0 of that plan.
+If you are reading this as a developer, the shortest useful summary is: this project is building toward a production-grade, Apple-Silicon-native incompressible flow solver, and the repository currently reflects Milestone 1 of that plan.
 
 ## Current Status
 
-The repository is currently at **Milestone 0: Environment Lockdown**.
+The repository is currently at **Milestone 1: Mesh and Field Infrastructure**.
 
 Implemented today:
 
 - Apple-Silicon-only CMake configuration using Apple Clang
 - two labeled build profiles: `deterministic` and `benchmark`
+- validated `Grid` representation for structured Cartesian domains
+- MAC-aware pressure, scalar, and velocity field storage types
+- flat contiguous `double` buffers with explicit ghost-cell-aware indexing
+- boundary slab and ghost-layer helpers for future BC work
 - a smoke-test executable that reports build/runtime metadata
 - a minimal test executable wired into CTest
 - a simple time-based profiling helper script
-- scaffolded module layout for later solver milestones
+- scaffolded module layout for later solver milestones beyond the infrastructure layer
 
 What is not implemented yet:
 
-- structured-grid mesh and field storage
 - discrete operators
 - advection, diffusion, and projection steps
 - Poisson / multigrid solver infrastructure
-- checkpointing, benchmark cases, and validation harnesses beyond the Milestone 0 smoke tests
+- checkpointing, benchmark cases, and validation harnesses beyond the current infrastructure tests
 
 ## Project Goals
 
@@ -98,7 +101,7 @@ solver/
 
 What those directories mean in practice right now:
 
-- `core/`: the first runtime/build metadata library
+- `core/`: runtime/build metadata plus the first structured-grid and field-storage layer
 - `tools/`: the smoke-test executable and profiling helper
 - `tests/`: the minimal CTest-backed test executable
 - `operators/`, `solver/`, `linsolve/`, `bc/`, `io/`, `benchmarks/`: scaffolded directories reserved for later milestones
@@ -112,7 +115,7 @@ The build is intentionally split into two named profiles:
 - `deterministic`: the reference build for validation and reproducibility work
 - `benchmark`: the performance-oriented build for clearly labeled experiments
 
-At Milestone 0, those profiles differ mainly in floating-point behavior:
+At the current stage, those profiles differ mainly in floating-point behavior:
 
 - `deterministic` disables `-ffast-math`
 - `benchmark` enables `-ffast-math` when the compiler accepts it
@@ -137,7 +140,7 @@ cmake --build build/benchmark
 
 The current build produces:
 
-- `solver_core`: a small core library for runtime/build metadata
+- `solver_core`: a small core library for runtime/build metadata and mesh/field infrastructure
 - `solver_example`: a smoke-test executable under `build/<profile>/tools/`
 - `solver_tests`: a minimal test executable under `build/<profile>/tests/`
 
@@ -155,13 +158,19 @@ Run the benchmark-profile tests:
 ctest --test-dir build/benchmark --output-on-failure
 ```
 
-Today’s test coverage is intentionally small. The current test executable checks that:
+Today’s test coverage is still intentionally focused, but it now covers the full Milestone 1 gate. The current test executable checks that:
 
 - the build profile is one of the locked profile names
 - the runtime platform is Apple Silicon
 - the generated build banner includes the active profile
+- grid dimensions, spacings, and coordinate helpers behave as expected
+- pressure-field indexing matches the flat-buffer mapping contract
+- ghost layers and boundary slab helpers address the expected storage regions
+- storage is aligned and unit-stride in the `i` direction
+- MAC-grid cell-center and face-center placement is correct
+- field storage uses `double`
 
-That is enough for Milestone 0. It is not meant to stand in for the numerical verification suite described in the technical spec.
+That is enough for Milestone 1. It is not meant to stand in for the numerical verification suite described in the technical spec.
 
 ## Profiling
 
@@ -184,6 +193,8 @@ The implementation plan is spelled out in [EXECUTION_ROADMAP_V1.md](EXECUTION_RO
 5. Milestone 4: implement the projection step
 6. Milestone 5: implement the pressure linear solver system
 7. Milestone 6 and beyond: benchmark validation, boundary-condition generalization, restart/output, verification, profiling, optimization, 3D support, and conditional Metal acceleration
+
+The repository has completed the first two items in that sequence and is set up to move into operator work next.
 
 The important project rule is simple: **do not advance to the next milestone unless the current validation gate passes**.
 

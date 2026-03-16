@@ -251,71 +251,6 @@ void compute_factorized_correction_2d(const VelocityField& current_velocity,
   fill_component(current_velocity.z, factorized_correction.z);
 }
 
-void apply_total_pressure_gradient_face(PressureField& pressure_total,
-                                        const BoundaryFace face,
-                                        const FaceField& wall_normal_diffusion) {
-  const Axis axis = boundary_axis(face);
-  const IndexRange3D boundary_active = pressure_total.layout().boundary_active_range(face);
-  const IndexRange3D ghost_range = pressure_total.layout().ghost_range(face);
-  const IndexRange3D wall_active = wall_normal_diffusion.layout().active_range();
-  const double spacing = pressure_total.layout().grid().spacing(axis);
-  const bool lower = is_lower_boundary(face);
-  const Extent3D extent = boundary_active.extent();
-
-  for(int k = 0; k < extent.nz; ++k) {
-    for(int j = 0; j < extent.ny; ++j) {
-      for(int i = 0; i < extent.nx; ++i) {
-        const int bi = boundary_active.i_begin + i;
-        const int bj = boundary_active.j_begin + j;
-        const int bk = boundary_active.k_begin + k;
-        const int gi = ghost_range.i_begin + i;
-        const int gj = ghost_range.j_begin + j;
-        const int gk = ghost_range.k_begin + k;
-
-        int wi = bi;
-        int wj = bj;
-        int wk = bk;
-        switch(axis) {
-          case Axis::x:
-            wi = lower ? wall_active.i_begin : wall_active.i_end - 1;
-            break;
-          case Axis::y:
-            wj = lower ? wall_active.j_begin : wall_active.j_end - 1;
-            break;
-          case Axis::z:
-            wk = lower ? wall_active.k_begin : wall_active.k_end - 1;
-            break;
-        }
-
-        const double gradient = wall_normal_diffusion(wi, wj, wk);
-        const double active_value = pressure_total(bi, bj, bk);
-        pressure_total(gi, gj, gk) =
-            lower ? active_value - gradient * spacing : active_value + gradient * spacing;
-      }
-    }
-  }
-}
-
-void apply_zero_gradient_face(PressureField& pressure_total, const BoundaryFace face) {
-  const IndexRange3D boundary_active = pressure_total.layout().boundary_active_range(face);
-  const IndexRange3D ghost_range = pressure_total.layout().ghost_range(face);
-  const Extent3D extent = boundary_active.extent();
-
-  for(int k = 0; k < extent.nz; ++k) {
-    for(int j = 0; j < extent.ny; ++j) {
-      for(int i = 0; i < extent.nx; ++i) {
-        const int bi = boundary_active.i_begin + i;
-        const int bj = boundary_active.j_begin + j;
-        const int bk = boundary_active.k_begin + k;
-        const int gi = ghost_range.i_begin + i;
-        const int gj = ghost_range.j_begin + j;
-        const int gk = ghost_range.k_begin + k;
-        pressure_total(gi, gj, gk) = pressure_total(bi, bj, bk);
-      }
-    }
-  }
-}
-
 }  // namespace
 
 LidDrivenCavityConfig default_lid_driven_cavity_config() {
@@ -494,16 +429,6 @@ LidDrivenCavityValidation validate_lid_driven_cavity_re100(const LidDrivenCavity
 
 namespace detail {
 
-void apply_lid_driven_cavity_total_pressure_boundary_conditions(const VelocityField& diffusion,
-                                                                PressureField& pressure_total) {
-  apply_total_pressure_gradient_face(pressure_total, BoundaryFace::x_min, diffusion.x);
-  apply_total_pressure_gradient_face(pressure_total, BoundaryFace::x_max, diffusion.x);
-  apply_total_pressure_gradient_face(pressure_total, BoundaryFace::y_min, diffusion.y);
-  apply_total_pressure_gradient_face(pressure_total, BoundaryFace::y_max, diffusion.y);
-  apply_zero_gradient_face(pressure_total, BoundaryFace::z_min);
-  apply_zero_gradient_face(pressure_total, BoundaryFace::z_max);
-}
-
 void assemble_lid_driven_cavity_predictor_rhs(const VelocityField& current_velocity,
                                               const PressureField& pressure_total,
                                               const VelocityField* previous_advection,
@@ -580,7 +505,7 @@ LidDrivenCavityResult run_lid_driven_cavity(const LidDrivenCavityConfig& config)
   pressure_correction.fill(0.0);
   apply_velocity_boundary_conditions(boundary_conditions, velocity);
   compute_diffusion_term(velocity, viscosity, diffusion);
-  detail::apply_lid_driven_cavity_total_pressure_boundary_conditions(diffusion, pressure_total);
+  apply_total_pressure_boundary_conditions(boundary_conditions, diffusion, pressure_total);
 
   for(int step = 0; step < config.max_steps; ++step) {
     VelocityField current = velocity;
@@ -613,7 +538,7 @@ LidDrivenCavityResult run_lid_driven_cavity(const LidDrivenCavityConfig& config)
     axpy_active(pressure_total, pressure_correction, 1.0);
     axpy_active(pressure_total, pressure_rhs, -0.5 * viscosity * dt);
     compute_diffusion_term(corrected, viscosity, diffusion);
-    detail::apply_lid_driven_cavity_total_pressure_boundary_conditions(diffusion, pressure_total);
+    apply_total_pressure_boundary_conditions(boundary_conditions, diffusion, pressure_total);
 
     const CflDiagnostics cfl = compute_advective_cfl(corrected, dt);
     const double delta = max_velocity_change(velocity, corrected);

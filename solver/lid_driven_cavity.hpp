@@ -107,9 +107,6 @@ struct LidDrivenCavityResult {
 
 namespace detail {
 
-void apply_lid_driven_cavity_total_pressure_boundary_conditions(const VelocityField& diffusion,
-                                                                PressureField& pressure_total);
-
 void assemble_lid_driven_cavity_predictor_rhs(const VelocityField& current_velocity,
                                               const PressureField& pressure_total,
                                               const VelocityField* previous_advection,

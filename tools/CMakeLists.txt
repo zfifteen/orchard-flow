@@ -15,3 +15,12 @@ target_link_libraries(solver_cavity
   PRIVATE
     solver_momentum
 )
+
+add_executable(solver_channel
+  channel_flow_main.cpp
+)
+
+target_link_libraries(solver_channel
+  PRIVATE
+    solver_momentum
+)

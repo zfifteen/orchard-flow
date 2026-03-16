@@ -335,6 +335,51 @@ void apply_pressure_face_boundary(PressureField& pressure,
   }
 }
 
+void apply_total_pressure_gradient_face(PressureField& pressure_total,
+                                        const BoundaryFace face,
+                                        const FaceField& wall_normal_source) {
+  const Axis axis = boundary_axis(face);
+  const IndexRange3D boundary_active = pressure_total.layout().boundary_active_range(face);
+  const IndexRange3D ghost_range = pressure_total.layout().ghost_range(face);
+  const IndexRange3D wall_active = wall_normal_source.layout().active_range();
+  const double spacing = pressure_total.layout().grid().spacing(axis);
+  const bool lower = is_lower_boundary(face);
+  const Extent3D extent = boundary_active.extent();
+
+  for(int k = 0; k < extent.nz; ++k) {
+    for(int j = 0; j < extent.ny; ++j) {
+      for(int i = 0; i < extent.nx; ++i) {
+        const int bi = boundary_active.i_begin + i;
+        const int bj = boundary_active.j_begin + j;
+        const int bk = boundary_active.k_begin + k;
+        const int gi = ghost_range.i_begin + i;
+        const int gj = ghost_range.j_begin + j;
+        const int gk = ghost_range.k_begin + k;
+
+        int wi = bi;
+        int wj = bj;
+        int wk = bk;
+        switch(axis) {
+          case Axis::x:
+            wi = lower ? wall_active.i_begin : wall_active.i_end - 1;
+            break;
+          case Axis::y:
+            wj = lower ? wall_active.j_begin : wall_active.j_end - 1;
+            break;
+          case Axis::z:
+            wk = lower ? wall_active.k_begin : wall_active.k_end - 1;
+            break;
+        }
+
+        const double gradient = wall_normal_source(wi, wj, wk);
+        const double active_value = pressure_total(bi, bj, bk);
+        pressure_total(gi, gj, gk) =
+            lower ? active_value - gradient * spacing : active_value + gradient * spacing;
+      }
+    }
+  }
+}
+
 void apply_face_field_boundary(FaceField& field,
                                const BoundaryFace face,
                                const BoundaryCondition& condition) {
@@ -512,12 +557,178 @@ void solve_tridiagonal(const std::vector<double>& lower,
   }
 }
 
+void solve_cyclic_tridiagonal(const std::vector<double>& lower,
+                              const std::vector<double>& diagonal,
+                              const std::vector<double>& upper,
+                              const double lower_corner,
+                              const double upper_corner,
+                              const std::vector<double>& rhs,
+                              std::vector<double>& solution) {
+  const std::size_t n = diagonal.size();
+  if(n == 0) {
+    solution.clear();
+    return;
+  }
+
+  if(n == 1) {
+    const double pivot = diagonal[0] + lower_corner + upper_corner;
+    if(std::abs(pivot) < kSmallNumber) {
+      throw std::runtime_error("cyclic tridiagonal solve encountered a zero pivot");
+    }
+    solution.assign(1, rhs[0] / pivot);
+    return;
+  }
+
+  std::vector<double> diagonal_modified = diagonal;
+  const double gamma = -diagonal[0];
+  if(std::abs(gamma) < kSmallNumber) {
+    throw std::runtime_error("cyclic tridiagonal solve encountered a zero gamma");
+  }
+
+  diagonal_modified[0] = diagonal[0] - gamma;
+  diagonal_modified[n - 1] = diagonal[n - 1] - lower_corner * upper_corner / gamma;
+
+  std::vector<double> lower_modified = lower;
+  std::vector<double> upper_modified = upper;
+  lower_modified[0] = 0.0;
+  upper_modified[n - 1] = 0.0;
+
+  std::vector<double> x;
+  solve_tridiagonal(lower_modified, diagonal_modified, upper_modified, rhs, x);
+
+  std::vector<double> u(n, 0.0);
+  u[0] = gamma;
+  u[n - 1] = lower_corner;
+
+  std::vector<double> z;
+  solve_tridiagonal(lower_modified, diagonal_modified, upper_modified, u, z);
+
+  const double denominator = 1.0 + z[0] + upper_corner * z[n - 1] / gamma;
+  if(std::abs(denominator) < kSmallNumber) {
+    throw std::runtime_error("cyclic tridiagonal solve encountered a singular Sherman-Morrison update");
+  }
+
+  const double factor = (x[0] + upper_corner * x[n - 1] / gamma) / denominator;
+  solution.resize(n);
+  for(std::size_t i = 0; i < n; ++i) {
+    solution[i] = x[i] - factor * z[i];
+  }
+}
+
+void solve_component_sweep_periodic(const FaceField& input,
+                                    const Axis axis,
+                                    const double alpha,
+                                    FaceField& output,
+                                    int& line_solves) {
+  const Grid& grid = input.layout().grid();
+  const double spacing = grid.spacing(axis);
+  const double beta = alpha / (spacing * spacing);
+  const IndexRange3D active = input.layout().active_range();
+
+  const int begin = [&]() {
+    switch(axis) {
+      case Axis::x:
+        return active.i_begin;
+      case Axis::y:
+        return active.j_begin;
+      case Axis::z:
+        return active.k_begin;
+    }
+    return 0;
+  }();
+  const int end = [&]() {
+    const int active_end = [&]() {
+      switch(axis) {
+        case Axis::x:
+          return active.i_end;
+        case Axis::y:
+          return active.j_end;
+        case Axis::z:
+          return active.k_end;
+      }
+      return 0;
+    }();
+    return input.normal_axis() == axis ? active_end - 1 : active_end;
+  }();
+  const int unknowns = end - begin;
+  if(unknowns <= 0) {
+    return;
+  }
+
+  std::vector<double> lower(static_cast<std::size_t>(unknowns), -beta);
+  std::vector<double> diagonal(static_cast<std::size_t>(unknowns), 1.0 + 2.0 * beta);
+  std::vector<double> upper(static_cast<std::size_t>(unknowns), -beta);
+  std::vector<double> rhs(static_cast<std::size_t>(unknowns), 0.0);
+  std::vector<double> solution;
+  lower[0] = 0.0;
+  upper[static_cast<std::size_t>(unknowns - 1)] = 0.0;
+
+  switch(axis) {
+    case Axis::x:
+      for(int k = active.k_begin; k < active.k_end; ++k) {
+        for(int j = active.j_begin; j < active.j_end; ++j) {
+          for(int i = begin; i < end; ++i) {
+            rhs[static_cast<std::size_t>(i - begin)] = input(i, j, k);
+          }
+          solve_cyclic_tridiagonal(lower, diagonal, upper, -beta, -beta, rhs, solution);
+          for(int i = begin; i < end; ++i) {
+            output(i, j, k) = solution[static_cast<std::size_t>(i - begin)];
+          }
+          if(input.normal_axis() == axis) {
+            output(active.i_end - 1, j, k) = output(begin, j, k);
+          }
+          ++line_solves;
+        }
+      }
+      return;
+    case Axis::y:
+      for(int k = active.k_begin; k < active.k_end; ++k) {
+        for(int i = active.i_begin; i < active.i_end; ++i) {
+          for(int j = begin; j < end; ++j) {
+            rhs[static_cast<std::size_t>(j - begin)] = input(i, j, k);
+          }
+          solve_cyclic_tridiagonal(lower, diagonal, upper, -beta, -beta, rhs, solution);
+          for(int j = begin; j < end; ++j) {
+            output(i, j, k) = solution[static_cast<std::size_t>(j - begin)];
+          }
+          if(input.normal_axis() == axis) {
+            output(i, active.j_end - 1, k) = output(i, begin, k);
+          }
+          ++line_solves;
+        }
+      }
+      return;
+    case Axis::z:
+      for(int j = active.j_begin; j < active.j_end; ++j) {
+        for(int i = active.i_begin; i < active.i_end; ++i) {
+          for(int k = begin; k < end; ++k) {
+            rhs[static_cast<std::size_t>(k - begin)] = input(i, j, k);
+          }
+          solve_cyclic_tridiagonal(lower, diagonal, upper, -beta, -beta, rhs, solution);
+          for(int k = begin; k < end; ++k) {
+            output(i, j, k) = solution[static_cast<std::size_t>(k - begin)];
+          }
+          if(input.normal_axis() == axis) {
+            output(i, j, active.k_end - 1) = output(i, j, begin);
+          }
+          ++line_solves;
+        }
+      }
+      return;
+  }
+}
+
 void solve_component_sweep(const FaceField& input,
                            const Axis axis,
                            const BoundaryConditionSet& boundary_conditions,
                            const double alpha,
                            FaceField& output,
                            int& line_solves) {
+  if(velocity_axis_is_periodic(boundary_conditions, axis)) {
+    solve_component_sweep_periodic(input, axis, alpha, output, line_solves);
+    return;
+  }
+
   const Grid& grid = input.layout().grid();
   const double spacing = grid.spacing(axis);
   const double beta = alpha / (spacing * spacing);
@@ -771,6 +982,48 @@ void apply_pressure_boundary_conditions(const PressureBoundarySet& boundary_cond
   }
 }
 
+void apply_total_pressure_boundary_conditions(const BoundaryConditionSet& boundary_conditions,
+                                              const VelocityField& normal_pressure_gradient_source,
+                                              PressureField& pressure_total) {
+  for(const Axis axis : {Axis::x, Axis::y, Axis::z}) {
+    if(velocity_axis_is_periodic(boundary_conditions, axis)) {
+      apply_periodic_pair(static_cast<StructuredField&>(pressure_total), axis, false);
+      continue;
+    }
+
+    for(const BoundaryFace face : {lower_face(axis), upper_face(axis)}) {
+      const BoundaryCondition& condition = boundary_conditions[face];
+      switch(condition.type) {
+        case PhysicalBoundaryType::no_slip_wall:
+        case PhysicalBoundaryType::prescribed_velocity:
+        case PhysicalBoundaryType::symmetry:
+          switch(axis) {
+            case Axis::x:
+              apply_total_pressure_gradient_face(pressure_total, face, normal_pressure_gradient_source.x);
+              break;
+            case Axis::y:
+              apply_total_pressure_gradient_face(pressure_total, face, normal_pressure_gradient_source.y);
+              break;
+            case Axis::z:
+              apply_total_pressure_gradient_face(pressure_total, face, normal_pressure_gradient_source.z);
+              break;
+          }
+          break;
+        case PhysicalBoundaryType::fixed_pressure: {
+          const PressureBoundaryCondition pressure_boundary{
+              .type = PressureBoundaryType::dirichlet,
+              .value = condition.pressure,
+          };
+          apply_pressure_face_boundary(pressure_total, face, pressure_boundary);
+          break;
+        }
+        case PhysicalBoundaryType::periodic:
+          break;
+      }
+    }
+  }
+}
+
 HelmholtzDiagnostics solve_predictor_adi(const VelocityField& rhs,
                                          const double alpha,
                                          const BoundaryConditionSet& boundary_conditions,
@@ -825,8 +1078,13 @@ void correct_velocity(const VelocityField& predicted_velocity,
   require_same_layout(predicted_velocity.y, corrected_velocity.y, "correct_velocity");
   require_same_layout(predicted_velocity.z, corrected_velocity.z, "correct_velocity");
 
+  PressureField pressure_correction_with_ghosts = pressure_correction;
+  apply_pressure_boundary_conditions(
+      derive_pressure_correction_boundary_conditions(boundary_conditions),
+      pressure_correction_with_ghosts);
+
   VelocityField pressure_gradient{pressure_correction.layout().grid()};
-  operators::compute_gradient(pressure_correction, pressure_gradient);
+  operators::compute_gradient(pressure_correction_with_ghosts, pressure_gradient);
 
   corrected_velocity = predicted_velocity;
   axpy_active(corrected_velocity.x, pressure_gradient.x, -options.dt / options.density);

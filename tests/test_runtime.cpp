@@ -3,6 +3,7 @@
 #include "core/runtime.hpp"
 #include "linsolve/poisson_solver.hpp"
 #include "operators/discrete_operators.hpp"
+#include "solver/channel_flow.hpp"
 #include "solver/lid_driven_cavity.hpp"
 #include "solver/momentum_terms.hpp"
 #include "solver/projection.hpp"
@@ -694,8 +695,62 @@ void test_predictor_adi_preserves_quiescent_state() {
   require(velocity_max_abs(predicted) <= 1.0e-12, "quiescent predictor state should remain zero");
 }
 
-void test_lid_driven_cavity_total_pressure_boundary_conditions() {
+void test_predictor_adi_preserves_periodic_couette_state() {
+  solver::ChannelFlowConfig config = solver::default_channel_flow_config();
+  config.case_kind = solver::ChannelFlowCase::couette;
+  config.nx = 16;
+  config.ny = 12;
+  const solver::Grid grid{config.nx,
+                          config.ny,
+                          1,
+                          1.0 / static_cast<double>(config.nx),
+                          1.0 / static_cast<double>(config.ny),
+                          1.0,
+                          1};
+  const solver::BoundaryConditionSet boundary_conditions =
+      solver::make_channel_flow_boundary_conditions(config);
+
+  solver::VelocityField rhs{grid};
+  solver::VelocityField predicted{grid};
+  fill_storage(rhs.x, [&config](double, const double y, double) {
+    return config.top_velocity * y;
+  });
+  fill_storage(rhs.y, [](double, double, double) {
+    return 0.0;
+  });
+  fill_storage(rhs.z, [](double, double, double) {
+    return 0.0;
+  });
+  solver::apply_velocity_boundary_conditions(boundary_conditions, rhs);
+  predicted = rhs;
+
+  const solver::HelmholtzDiagnostics diagnostics =
+      solver::solve_predictor_adi(rhs, 0.01, boundary_conditions, predicted);
+
+  require(diagnostics.line_solves > 0, "periodic Couette predictor should perform line solves");
+  require(relative_active_l2_difference(predicted.x, rhs.x) <= 1.0e-12,
+          "periodic ADI sweep should preserve the exact Couette streamwise state");
+  require(velocity_max_abs(predicted) <= config.top_velocity + 1.0e-12,
+          "periodic Couette predictor should remain bounded");
+}
+
+void test_total_pressure_boundary_conditions_general_bc() {
   const solver::Grid grid{4, 3, 1, 0.25, 1.0 / 3.0, 1.0, 1};
+  solver::BoundaryConditionSet boundary_conditions{};
+  boundary_conditions[solver::BoundaryFace::x_min].type =
+      solver::PhysicalBoundaryType::fixed_pressure;
+  boundary_conditions[solver::BoundaryFace::x_min].pressure = 2.5;
+  boundary_conditions[solver::BoundaryFace::x_max].type =
+      solver::PhysicalBoundaryType::fixed_pressure;
+  boundary_conditions[solver::BoundaryFace::x_max].pressure = 0.75;
+  boundary_conditions[solver::BoundaryFace::y_min].type =
+      solver::PhysicalBoundaryType::no_slip_wall;
+  boundary_conditions[solver::BoundaryFace::y_max].type =
+      solver::PhysicalBoundaryType::prescribed_velocity;
+  boundary_conditions[solver::BoundaryFace::y_max].velocity = {1.0, 0.0, 0.0};
+  boundary_conditions[solver::BoundaryFace::z_min].type = solver::PhysicalBoundaryType::symmetry;
+  boundary_conditions[solver::BoundaryFace::z_max].type = solver::PhysicalBoundaryType::symmetry;
+
   solver::PressureField pressure_total{grid};
   solver::VelocityField diffusion{grid};
   pressure_total.fill(-99.0);
@@ -722,7 +777,7 @@ void test_lid_driven_cavity_total_pressure_boundary_conditions() {
     }
   }
 
-  solver::detail::apply_lid_driven_cavity_total_pressure_boundary_conditions(diffusion, pressure_total);
+  solver::apply_total_pressure_boundary_conditions(boundary_conditions, diffusion, pressure_total);
 
   const solver::IndexRange3D x_min_ghost = pressure_total.layout().ghost_range(solver::BoundaryFace::x_min);
   const solver::IndexRange3D x_max_ghost = pressure_total.layout().ghost_range(solver::BoundaryFace::x_max);
@@ -733,16 +788,14 @@ void test_lid_driven_cavity_total_pressure_boundary_conditions() {
 
   for(int k = pressure_active.k_begin; k < pressure_active.k_end; ++k) {
     for(int j = pressure_active.j_begin; j < pressure_active.j_end; ++j) {
-      const double x_min_expected =
-          pressure_total(pressure_active.i_begin, j, k) -
-          diffusion.x(u_active.i_begin, j, k) * grid.dx;
-      const double x_max_expected =
-          pressure_total(pressure_active.i_end - 1, j, k) +
-          diffusion.x(u_active.i_end - 1, j, k) * grid.dx;
+      const double x_min_expected = 2.0 * boundary_conditions[solver::BoundaryFace::x_min].pressure -
+                                    pressure_total(pressure_active.i_begin, j, k);
+      const double x_max_expected = 2.0 * boundary_conditions[solver::BoundaryFace::x_max].pressure -
+                                    pressure_total(pressure_active.i_end - 1, j, k);
       require(std::abs(pressure_total(x_min_ghost.i_begin, j, k) - x_min_expected) <= 1.0e-12,
-              "x_min total-pressure ghost fill is inconsistent");
+              "fixed-pressure x_min total-pressure ghost fill is inconsistent");
       require(std::abs(pressure_total(x_max_ghost.i_begin, j, k) - x_max_expected) <= 1.0e-12,
-              "x_max total-pressure ghost fill is inconsistent");
+              "fixed-pressure x_max total-pressure ghost fill is inconsistent");
     }
   }
 
@@ -755,9 +808,9 @@ void test_lid_driven_cavity_total_pressure_boundary_conditions() {
           pressure_total(i, pressure_active.j_end - 1, k) +
           diffusion.y(i, v_active.j_end - 1, k) * grid.dy;
       require(std::abs(pressure_total(i, y_min_ghost.j_begin, k) - y_min_expected) <= 1.0e-12,
-              "y_min total-pressure ghost fill is inconsistent");
+              "Neumann y_min total-pressure ghost fill is inconsistent");
       require(std::abs(pressure_total(i, y_max_ghost.j_begin, k) - y_max_expected) <= 1.0e-12,
-              "y_max total-pressure ghost fill is inconsistent");
+              "Neumann y_max total-pressure ghost fill is inconsistent");
     }
   }
 
@@ -876,8 +929,8 @@ void test_lid_driven_cavity_predictor_rhs_matches_manual_formula() {
 
   solver::apply_velocity_boundary_conditions(boundary_conditions, current_velocity);
   solver::compute_diffusion_term(current_velocity, viscosity, expected_diffusion);
-  solver::detail::apply_lid_driven_cavity_total_pressure_boundary_conditions(expected_diffusion,
-                                                                             pressure_total);
+  solver::apply_total_pressure_boundary_conditions(boundary_conditions, expected_diffusion,
+                                                   pressure_total);
   solver::compute_advection_term(current_velocity, config.advection, expected_advection);
   solver::operators::compute_gradient(pressure_total, expected_pressure_gradient);
   expected_rhs = current_velocity;
@@ -1380,6 +1433,88 @@ void test_lid_driven_cavity_config_loader_and_bc_subset() {
           "2D cavity z_max should map to symmetry");
 }
 
+void test_channel_flow_config_loader_and_boundary_conditions() {
+  const solver::ChannelFlowConfig couette = solver::load_channel_flow_config(
+      source_path("benchmarks/channel_couette_smoke.cfg"));
+  require(couette.case_kind == solver::ChannelFlowCase::couette,
+          "Couette config should parse the case kind");
+  require(couette.nx == 32 && couette.ny == 32, "Couette smoke config should load the grid size");
+  require(couette.validate_profile, "Couette smoke config should validate the profile");
+
+  const solver::BoundaryConditionSet couette_bc =
+      solver::make_channel_flow_boundary_conditions(couette);
+  require(couette_bc[solver::BoundaryFace::x_min].type ==
+              solver::PhysicalBoundaryType::periodic,
+          "Couette x_min should be periodic");
+  require(couette_bc[solver::BoundaryFace::x_max].type ==
+              solver::PhysicalBoundaryType::periodic,
+          "Couette x_max should be periodic");
+  require(couette_bc[solver::BoundaryFace::y_min].type ==
+              solver::PhysicalBoundaryType::no_slip_wall,
+          "Couette lower wall should be no-slip");
+  require(couette_bc[solver::BoundaryFace::y_max].type ==
+              solver::PhysicalBoundaryType::prescribed_velocity,
+          "Couette upper wall should prescribe the lid velocity");
+  require(std::abs(couette_bc[solver::BoundaryFace::y_max].velocity[0] - couette.top_velocity) <=
+              1.0e-12,
+          "Couette upper-wall speed mismatch");
+
+  const solver::ChannelFlowConfig poiseuille = solver::load_channel_flow_config(
+      source_path("benchmarks/channel_poiseuille_smoke.cfg"));
+  require(poiseuille.case_kind == solver::ChannelFlowCase::poiseuille,
+          "Poiseuille config should parse the case kind");
+
+  const solver::BoundaryConditionSet poiseuille_bc =
+      solver::make_channel_flow_boundary_conditions(poiseuille);
+  require(poiseuille_bc[solver::BoundaryFace::x_min].type ==
+              solver::PhysicalBoundaryType::fixed_pressure,
+          "Poiseuille x_min should be fixed pressure");
+  require(poiseuille_bc[solver::BoundaryFace::x_max].type ==
+              solver::PhysicalBoundaryType::fixed_pressure,
+          "Poiseuille x_max should be fixed pressure");
+  require(std::abs(poiseuille_bc[solver::BoundaryFace::x_min].pressure -
+                   poiseuille.pressure_drop) <= 1.0e-12,
+          "Poiseuille inlet pressure mismatch");
+  require(std::abs(poiseuille_bc[solver::BoundaryFace::x_max].pressure) <= 1.0e-12,
+          "Poiseuille outlet pressure should default to zero");
+  require(poiseuille_bc[solver::BoundaryFace::y_max].type ==
+              solver::PhysicalBoundaryType::no_slip_wall,
+          "Poiseuille upper wall should remain no-slip");
+}
+
+void test_channel_flow_couette_profile_validation() {
+  const solver::ChannelFlowConfig config = solver::load_channel_flow_config(
+      source_path("benchmarks/channel_couette_smoke.cfg"));
+  const solver::ChannelFlowResult result = solver::run_channel_flow(config);
+
+  require(result.final_step.step == config.steps, "Couette run should consume the configured steps");
+  require(result.final_step.dt > 0.0, "Couette timestep should be positive");
+  require(result.final_step.max_cfl <= config.cfl_limit + 1.0e-12,
+          "Couette CFL should respect the configured ceiling");
+  require(result.validation.reference_dataset == "analytic_couette_profile",
+          "Couette validation should report the analytic profile dataset");
+  require(result.validation.relative_l2_error <= 5.0e-3,
+          "Couette profile error exceeded the M7 threshold");
+  require(result.validation.pass, "Couette smoke validation should pass");
+}
+
+void test_channel_flow_poiseuille_profile_validation() {
+  const solver::ChannelFlowConfig config = solver::load_channel_flow_config(
+      source_path("benchmarks/channel_poiseuille_smoke.cfg"));
+  const solver::ChannelFlowResult result = solver::run_channel_flow(config);
+
+  require(result.final_step.step == config.steps,
+          "Poiseuille run should consume the configured steps");
+  require(result.final_step.dt > 0.0, "Poiseuille timestep should be positive");
+  require(result.final_step.max_cfl <= config.cfl_limit + 1.0e-12,
+          "Poiseuille CFL should respect the configured ceiling");
+  require(result.validation.reference_dataset == "analytic_poiseuille_profile",
+          "Poiseuille validation should report the analytic profile dataset");
+  require(result.validation.relative_l2_error <= 5.0e-3,
+          "Poiseuille profile error exceeded the M7 threshold");
+  require(result.validation.pass, "Poiseuille smoke validation should pass");
+}
+
 void test_lid_driven_cavity_smoke_run() {
   const solver::LidDrivenCavityConfig config = solver::load_lid_driven_cavity_config(
       source_path("benchmarks/lid_driven_cavity_smoke.cfg"));
@@ -1461,7 +1596,8 @@ int main() {
     test_advection_options_and_cfl_diagnostic();
     test_projection_boundary_mapping();
     test_predictor_adi_preserves_quiescent_state();
-    test_lid_driven_cavity_total_pressure_boundary_conditions();
+    test_predictor_adi_preserves_periodic_couette_state();
+    test_total_pressure_boundary_conditions_general_bc();
     test_predictor_adi_matches_factorized_dense_reference();
     test_lid_driven_cavity_predictor_rhs_matches_manual_formula();
     test_poisson_mgpcg_discrete_dirichlet_recovery();
@@ -1473,6 +1609,9 @@ int main() {
     test_static_projection_preserves_quiescent_fluid();
     test_pure_neumann_projection_recovers_zero_mean_pressure();
     test_lid_driven_cavity_config_loader_and_bc_subset();
+    test_channel_flow_config_loader_and_boundary_conditions();
+    test_channel_flow_couette_profile_validation();
+    test_channel_flow_poiseuille_profile_validation();
     test_lid_driven_cavity_smoke_run();
     test_lid_driven_cavity_reference_validation_gate();
   } catch(const std::exception& exception) {

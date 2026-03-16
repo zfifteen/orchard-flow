@@ -1,4 +1,5 @@
 add_library(solver_momentum STATIC
+  channel_flow.cpp
   lid_driven_cavity.cpp
   momentum_terms.cpp
   projection.cpp

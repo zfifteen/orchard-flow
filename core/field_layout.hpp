@@ -109,6 +109,13 @@ class FieldLayout {
     return storage_.cell_count();
   }
 
+  [[nodiscard]] constexpr bool same_shape_as(const FieldLayout& other) const noexcept {
+    return location_ == other.location_ && ghost_layers_ == other.ghost_layers_ &&
+           active_.nx == other.active_.nx && active_.ny == other.active_.ny &&
+           active_.nz == other.active_.nz && storage_.nx == other.storage_.nx &&
+           storage_.ny == other.storage_.ny && storage_.nz == other.storage_.nz;
+  }
+
   [[nodiscard]] constexpr bool is_unit_stride_i() const noexcept {
     return true;
   }
@@ -200,7 +207,16 @@ class FieldLayout {
   }
 
   [[nodiscard]] double coordinate_for_storage_index(const Axis axis, const int storage_index) const {
-    return coordinate_at_active_index(axis, storage_index - ghost_layers_);
+    if(storage_index < 0 || storage_index >= storage_.count(axis)) {
+      throw std::out_of_range("storage coordinate index outside field extent");
+    }
+
+    const int shifted_index = storage_index - ghost_layers_;
+    if(location_ != FieldLocation::cell_center && axis == normal_axis(location_)) {
+      return static_cast<double>(shifted_index) * grid_.spacing(axis);
+    }
+
+    return (static_cast<double>(shifted_index) + 0.5) * grid_.spacing(axis);
   }
 
  private:
@@ -256,4 +272,3 @@ class FieldLayout {
 };
 
 }  // namespace solver
-

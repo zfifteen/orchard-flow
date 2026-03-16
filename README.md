@@ -4,13 +4,13 @@ This repository is the beginning of a very specific kind of CFD project: an inco
 
 That combination matters here. A lot of scientific software grows by accumulating features first and worrying about rigor later. This project is trying to do the opposite. The solver is being designed from the outset around a clear numerical method, explicit validation gates, deterministic execution rules, and a roadmap that only moves forward when the previous layer is correct. If the end result works, it should be the kind of codebase a new engineer can open, reason about, benchmark, and trust.
 
-Right now, the repository is still early. It does not yet contain the Navier-Stokes machinery described in the technical spec. What it does contain is the first locked-down layer of that system: the build environment, the project structure, the profile split between validation and benchmarking, a smoke-test executable, a minimal test harness, and a tiny profiling helper. In other words, this repo is already opinionated about how the solver should be built and verified, even before the mesh, fields, operators, and solvers arrive.
+Right now, the repository is still early. It does not yet contain the full Navier-Stokes timestepper described in the technical spec. What it does contain is the locked-down foundation for that system: the build environment, the project structure, the profile split between validation and benchmarking, the structured-grid and field-storage layer, the first discrete operators, a smoke-test executable, a focused test harness, and a tiny profiling helper. In other words, this repo is already opinionated about how the solver should be built and verified before the time-integration and linear-solver machinery arrives.
 
-If you are reading this as a developer, the shortest useful summary is: this project is building toward a production-grade, Apple-Silicon-native incompressible flow solver, and the repository currently reflects Milestone 1 of that plan.
+If you are reading this as a developer, the shortest useful summary is: this project is building toward a production-grade, Apple-Silicon-native incompressible flow solver, and the repository currently reflects Milestone 2 of that plan.
 
 ## Current Status
 
-The repository is currently at **Milestone 1: Mesh and Field Infrastructure**.
+The repository is currently at **Milestone 2: Discrete Operators**.
 
 Implemented today:
 
@@ -20,6 +20,8 @@ Implemented today:
 - MAC-aware pressure, scalar, and velocity field storage types
 - flat contiguous `double` buffers with explicit ghost-cell-aware indexing
 - boundary slab and ghost-layer helpers for future BC work
+- second-order discrete `gradient`, `divergence`, and `laplacian` operators
+- manufactured-solution convergence checks for the operator layer
 - a smoke-test executable that reports build/runtime metadata
 - a minimal test executable wired into CTest
 - a simple time-based profiling helper script
@@ -27,7 +29,6 @@ Implemented today:
 
 What is not implemented yet:
 
-- discrete operators
 - advection, diffusion, and projection steps
 - Poisson / multigrid solver infrastructure
 - checkpointing, benchmark cases, and validation harnesses beyond the current infrastructure tests
@@ -80,7 +81,7 @@ The full solver architecture is described in [TECH-SPEC.md](TECH-SPEC.md), but t
 - precision policy: `double` for solution state and pressure-solver reductions
 - validation default: advective CFL `<= 0.5` unless a benchmark case says otherwise
 
-That numerical path is not implemented in the code yet, but it is already the governing design contract for the upcoming milestones.
+Parts of that numerical path are now implemented at the operator layer, and the rest remains the governing design contract for the upcoming milestones.
 
 ## Repository Layout
 
@@ -102,9 +103,10 @@ solver/
 What those directories mean in practice right now:
 
 - `core/`: runtime/build metadata plus the first structured-grid and field-storage layer
+- `operators/`: second-order structured-grid discrete operators
 - `tools/`: the smoke-test executable and profiling helper
 - `tests/`: the minimal CTest-backed test executable
-- `operators/`, `solver/`, `linsolve/`, `bc/`, `io/`, `benchmarks/`: scaffolded directories reserved for later milestones
+- `solver/`, `linsolve/`, `bc/`, `io/`, `benchmarks/`: scaffolded directories reserved for later milestones
 
 The technical and roadmap documents live at the repository root and currently act as the primary design references.
 
@@ -141,6 +143,7 @@ cmake --build build/benchmark
 The current build produces:
 
 - `solver_core`: a small core library for runtime/build metadata and mesh/field infrastructure
+- `solver_operators`: the discrete-operator library built on top of the core field layer
 - `solver_example`: a smoke-test executable under `build/<profile>/tools/`
 - `solver_tests`: a minimal test executable under `build/<profile>/tests/`
 
@@ -158,7 +161,7 @@ Run the benchmark-profile tests:
 ctest --test-dir build/benchmark --output-on-failure
 ```
 
-Today’s test coverage is still intentionally focused, but it now covers the full Milestone 1 gate. The current test executable checks that:
+Today’s test coverage is still intentionally focused, but it now covers the full Milestone 2 gate. The current test executable checks that:
 
 - the build profile is one of the locked profile names
 - the runtime platform is Apple Silicon
@@ -169,8 +172,10 @@ Today’s test coverage is still intentionally focused, but it now covers the fu
 - storage is aligned and unit-stride in the `i` direction
 - MAC-grid cell-center and face-center placement is correct
 - field storage uses `double`
+- manufactured-solution error norms for gradient, divergence, and Laplacian decrease under refinement
+- observed operator convergence is at least second-order in the Milestone 2 validation case
 
-That is enough for Milestone 1. It is not meant to stand in for the numerical verification suite described in the technical spec.
+That is enough for Milestone 2. It is not meant to stand in for the full benchmark and regression suite described in the technical spec.
 
 ## Profiling
 
@@ -194,7 +199,7 @@ The implementation plan is spelled out in [EXECUTION_ROADMAP_V1.md](EXECUTION_RO
 6. Milestone 5: implement the pressure linear solver system
 7. Milestone 6 and beyond: benchmark validation, boundary-condition generalization, restart/output, verification, profiling, optimization, 3D support, and conditional Metal acceleration
 
-The repository has completed the first two items in that sequence and is set up to move into operator work next.
+The repository has completed the first three items in that sequence and is set up to move into advection and diffusion work next.
 
 The important project rule is simple: **do not advance to the next milestone unless the current validation gate passes**.
 

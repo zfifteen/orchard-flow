@@ -81,6 +81,6 @@ message(STATUS "  -march=armv8-a: ${SOLVER_HAS_MARCH_ARMV8_A}")
 message(STATUS "  -ffast-math: ${SOLVER_HAS_FAST_MATH}")
 
 add_subdirectory(core)
+add_subdirectory(operators)
 add_subdirectory(tools)
 add_subdirectory(tests)
-

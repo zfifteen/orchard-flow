@@ -1,3 +1,5 @@
+<img src="./assets/banner.png" alt="Apple-Native Solver Banner" width="100%" />
+
 # Apple-Native Solver
 
 Apple-Native Solver is an incompressible CFD codebase built specifically for Apple Silicon. It is designed to be numerically serious, deterministic in its reference workflow, and transparent enough to validate, restart, benchmark, and profile without turning into a portability-first research grab bag.

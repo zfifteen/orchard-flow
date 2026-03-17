@@ -65,6 +65,7 @@ std::filesystem::path temp_path(const std::string& filename) {
 
 std::vector<std::uint8_t> read_binary_file(const std::filesystem::path& path) {
   std::ifstream input(path, std::ios::binary);
+  require(input.is_open(), "read_binary_file could not open path: " + path.string());
   return std::vector<std::uint8_t>(std::istreambuf_iterator<char>(input),
                                    std::istreambuf_iterator<char>());
 }
@@ -72,8 +73,10 @@ std::vector<std::uint8_t> read_binary_file(const std::filesystem::path& path) {
 void write_binary_file(const std::filesystem::path& path,
                        const std::vector<std::uint8_t>& bytes) {
   std::ofstream output(path, std::ios::binary);
+  require(output.is_open(), "write_binary_file could not open path: " + path.string());
   output.write(reinterpret_cast<const char*>(bytes.data()),
                static_cast<std::streamsize>(bytes.size()));
+  require(output.good(), "write_binary_file failed for path: " + path.string());
 }
 
 std::uint64_t read_le_u64(const std::vector<std::uint8_t>& bytes,
@@ -152,6 +155,8 @@ CheckpointSectionView find_checkpoint_section(const std::vector<std::uint8_t>& b
 
 void refresh_checkpoint_payload_header(std::vector<std::uint8_t>& bytes) {
   constexpr std::size_t kPayloadOffset = 8 + 4 + 8 + 8;
+  require(bytes.size() >= kPayloadOffset,
+          "refresh_checkpoint_payload_header requires a full checkpoint header");
   const std::uint64_t payload_size = bytes.size() - kPayloadOffset;
   write_le_u64(bytes, 12, payload_size);
   const std::uint64_t checksum =
@@ -2130,6 +2135,29 @@ void test_lid_driven_cavity_checkpoint_rejects_configuration_mismatch() {
   std::filesystem::remove(checkpoint_path, ignore_error);
 }
 
+void test_checkpoint_test_helpers_reject_invalid_io() {
+  const std::filesystem::path missing_path = temp_path("solver_missing_checkpoint_helper.chk");
+  require_exception_contains(
+      [&] { static_cast<void>(read_binary_file(missing_path)); },
+      "read_binary_file could not open path",
+      "read_binary_file should reject missing paths");
+
+  const std::filesystem::path unwritable_path =
+      std::filesystem::path("/definitely/not/a/real/directory") / "solver_write_fail.chk";
+  require_exception_contains(
+      [&] { write_binary_file(unwritable_path, {0x01u, 0x02u}); },
+      "write_binary_file could not open path",
+      "write_binary_file should reject unwritable paths");
+}
+
+void test_checkpoint_test_helpers_reject_undersized_header() {
+  std::vector<std::uint8_t> bytes(8u, 0u);
+  require_exception_contains(
+      [&] { refresh_checkpoint_payload_header(bytes); },
+      "refresh_checkpoint_payload_header requires a full checkpoint header",
+      "refresh_checkpoint_payload_header should reject undersized buffers");
+}
+
 void test_lid_driven_cavity_vtk_export() {
   solver::LidDrivenCavityConfig config = solver::load_lid_driven_cavity_config(
       source_path("benchmarks/lid_driven_cavity_smoke.cfg"));
@@ -2264,6 +2292,8 @@ int main() {
     test_lid_driven_cavity_checkpoint_rejects_unsupported_version();
     test_lid_driven_cavity_checkpoint_rejects_build_hash_mismatch();
     test_lid_driven_cavity_checkpoint_rejects_configuration_mismatch();
+    test_checkpoint_test_helpers_reject_invalid_io();
+    test_checkpoint_test_helpers_reject_undersized_header();
     test_lid_driven_cavity_restart_is_bitwise_deterministic();
     test_lid_driven_cavity_vtk_export();
     test_lid_driven_cavity_smoke_run();

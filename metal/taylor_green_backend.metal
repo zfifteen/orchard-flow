@@ -814,14 +814,18 @@ kernel void correct_velocity_w(const device solver_scalar* predicted [[buffer(0)
           params);
 }
 
-kernel void add_pressure_correction(device solver_scalar* pressure_total [[buffer(0)]],
-                                    const device solver_scalar* pressure_correction [[buffer(1)]],
-                                    constant uint& count [[buffer(2)]],
+kernel void update_total_pressure(device solver_scalar* pressure_total [[buffer(0)]],
+                                  const device solver_scalar* pressure_correction [[buffer(1)]],
+                                  const device solver_scalar* pressure_rhs [[buffer(2)]],
+                                  constant SolverParams& params [[buffer(3)]],
                                     uint gid [[thread_position_in_grid]]) {
+  const uint count = params.nx * params.ny * params.nz;
   if(gid >= count) {
     return;
   }
-  pressure_total[gid] += pressure_correction[gid];
+  pressure_total[gid] += pressure_correction[gid] -
+                         static_cast<solver_scalar>(0.5) * params.viscosity * params.dt *
+                             pressure_rhs[gid];
 }
 
 kernel void dot_partial(const device solver_scalar* left [[buffer(0)]],

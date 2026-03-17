@@ -20,10 +20,12 @@ namespace {
 
 #if SOLVER_METAL_USE_FLOAT
 using MetalScalar = float;
-constexpr double kCgTolerance = 1.0e-6;
+constexpr double kFaceCgTolerance = 1.0e-4;
+constexpr double kPressureCgTolerance = 1.0e-6;
 #else
 using MetalScalar = double;
-constexpr double kCgTolerance = 1.0e-12;
+constexpr double kFaceCgTolerance = 1.0e-12;
+constexpr double kPressureCgTolerance = 1.0e-12;
 #endif
 
 constexpr NSUInteger kThreadsPerThreadgroup = 256;
@@ -156,11 +158,14 @@ class MetalRunner {
       params_.use_ab2 = has_previous_advection ? 1u : 0u;
 
       assemble_component(0u);
-      solve_face_system(next_velocity_[0]);
+      const LinearSolveStats u_stats = solve_face_system(next_velocity_[0]);
+      require_linear_solve_converged(u_stats, "Metal face u solve", step + 1, kFaceCgTolerance);
       assemble_component(1u);
-      solve_face_system(next_velocity_[1]);
+      const LinearSolveStats v_stats = solve_face_system(next_velocity_[1]);
+      require_linear_solve_converged(v_stats, "Metal face v solve", step + 1, kFaceCgTolerance);
       assemble_component(2u);
-      solve_face_system(next_velocity_[2]);
+      const LinearSolveStats w_stats = solve_face_system(next_velocity_[2]);
+      require_linear_solve_converged(w_stats, "Metal face w solve", step + 1, kFaceCgTolerance);
 
       build_pressure_rhs();
       const MetalScalar rhs_mean = reduce_sum(pressure_rhs_) / static_cast<MetalScalar>(cell_count_);
@@ -168,12 +173,15 @@ class MetalRunner {
         subtract_scalar_from_buffer(pressure_rhs_, rhs_mean, cell_count_);
       }
 
-      const auto pressure_stats = solve_pressure_system();
+      const LinearSolveStats pressure_stats = solve_pressure_system();
+      const double pressure_tolerance = std::max(config_.poisson_tolerance, kPressureCgTolerance);
+      require_linear_solve_converged(
+          pressure_stats, "Metal pressure solve", step + 1, pressure_tolerance);
 
       correct_velocity(0u);
       correct_velocity(1u);
       correct_velocity(2u);
-      add_pressure_correction();
+      update_total_pressure();
 
       const double divergence_l2 = compute_divergence_l2(next_velocity_);
       const double max_cfl = compute_cfl(next_velocity_);
@@ -214,10 +222,27 @@ class MetalRunner {
   }
 
  private:
-  struct PressureSolveStats {
+  struct LinearSolveStats {
     int iterations = 0;
     double relative_residual = 0.0;
+    bool converged = false;
   };
+
+  void require_linear_solve_converged(const LinearSolveStats& stats,
+                                      const std::string& solve_name,
+                                      const int step,
+                                      const double tolerance) const {
+    if(stats.converged) {
+      return;
+    }
+
+    std::ostringstream builder;
+    builder << solve_name << " did not converge at step " << step
+            << " (iterations=" << stats.iterations
+            << ", relative_residual=" << stats.relative_residual
+            << ", tolerance=" << tolerance << ")";
+    throw std::runtime_error(builder.str());
+  }
 
   SolverParams make_params() const {
     return SolverParams{
@@ -264,7 +289,7 @@ class MetalRunner {
     correct_u_pipeline_ = make_pipeline(@"correct_velocity_u");
     correct_v_pipeline_ = make_pipeline(@"correct_velocity_v");
     correct_w_pipeline_ = make_pipeline(@"correct_velocity_w");
-    add_pressure_pipeline_ = make_pipeline(@"add_pressure_correction");
+    update_total_pressure_pipeline_ = make_pipeline(@"update_total_pressure");
     dot_partial_pipeline_ = make_pipeline(@"dot_partial");
     sum_partial_pipeline_ = make_pipeline(@"sum_partial");
     max_abs_diff_pipeline_ = make_pipeline(@"max_abs_diff_partial");
@@ -516,7 +541,7 @@ class MetalRunner {
         });
   }
 
-  void solve_face_system(id<MTLBuffer> solution) {
+  LinearSolveStats solve_face_system(id<MTLBuffer> solution) {
     copy_buffer(face_rhs_, solution, static_cast<NSUInteger>(face_count_) * sizeof(MetalScalar));
 
     dispatch_1d(
@@ -539,13 +564,17 @@ class MetalRunner {
           [encoder setBytes:&face_count_ length:sizeof(face_count_) atIndex:4];
         });
 
+    LinearSolveStats stats{};
     MetalScalar residual_dot = reduce_dot(face_residual_, face_residual_, face_count_);
     if(static_cast<double>(residual_dot) <= std::numeric_limits<double>::epsilon()) {
-      return;
+      stats.converged = true;
+      return stats;
     }
 
     const MetalScalar initial_dot = residual_dot;
+    stats.relative_residual = 1.0;
     for(int iteration = 0; iteration < 80; ++iteration) {
+      stats.iterations = iteration + 1;
       dispatch_1d(
           factorized_operator_pipeline_,
           face_count_,
@@ -574,8 +603,9 @@ class MetalRunner {
           });
 
       const MetalScalar next_dot = reduce_dot(face_residual_, face_residual_, face_count_);
-      const double relative = std::sqrt(static_cast<double>(next_dot / initial_dot));
-      if(relative <= kCgTolerance) {
+      stats.relative_residual = std::sqrt(static_cast<double>(next_dot / initial_dot));
+      if(stats.relative_residual <= kFaceCgTolerance) {
+        stats.converged = true;
         break;
       }
 
@@ -591,6 +621,7 @@ class MetalRunner {
           });
       residual_dot = next_dot;
     }
+    return stats;
   }
 
   void build_pressure_rhs() {
@@ -606,7 +637,7 @@ class MetalRunner {
         });
   }
 
-  PressureSolveStats solve_pressure_system() {
+  LinearSolveStats solve_pressure_system() {
     zero_buffer(pressure_correction_);
     copy_buffer(pressure_rhs_,
                 pressure_residual_,
@@ -615,17 +646,19 @@ class MetalRunner {
                 pressure_direction_,
                 static_cast<NSUInteger>(cell_count_) * sizeof(MetalScalar));
 
+    LinearSolveStats stats{};
     MetalScalar residual_dot = reduce_dot(pressure_residual_, pressure_residual_, cell_count_);
     if(static_cast<double>(residual_dot) <= std::numeric_limits<double>::epsilon()) {
-      return PressureSolveStats{};
+      stats.converged = true;
+      return stats;
     }
 
     const MetalScalar initial_dot = residual_dot;
-    PressureSolveStats stats{};
     stats.relative_residual = 1.0;
 
-    const double target_relative = std::max(config_.poisson_tolerance, kCgTolerance);
+    const double target_relative = std::max(config_.poisson_tolerance, kPressureCgTolerance);
     for(int iteration = 0; iteration < config_.poisson_max_iterations; ++iteration) {
+      stats.iterations = iteration + 1;
       dispatch_1d(
           poisson_operator_pipeline_,
           cell_count_,
@@ -655,9 +688,9 @@ class MetalRunner {
           });
 
       const MetalScalar next_dot = reduce_dot(pressure_residual_, pressure_residual_, cell_count_);
-      stats.iterations = iteration + 1;
       stats.relative_residual = std::sqrt(static_cast<double>(next_dot / initial_dot));
       if(stats.relative_residual <= target_relative) {
+        stats.converged = true;
         break;
       }
 
@@ -706,14 +739,15 @@ class MetalRunner {
         });
   }
 
-  void add_pressure_correction() {
+  void update_total_pressure() {
     dispatch_1d(
-        add_pressure_pipeline_,
+        update_total_pressure_pipeline_,
         cell_count_,
         [&](id<MTLComputeCommandEncoder> encoder) {
           [encoder setBuffer:pressure_total_ offset:0 atIndex:0];
           [encoder setBuffer:pressure_correction_ offset:0 atIndex:1];
-          [encoder setBytes:&cell_count_ length:sizeof(cell_count_) atIndex:2];
+          [encoder setBuffer:pressure_rhs_ offset:0 atIndex:2];
+          [encoder setBytes:&params_ length:sizeof(params_) atIndex:3];
         });
   }
 
@@ -816,7 +850,7 @@ class MetalRunner {
   id<MTLComputePipelineState> correct_u_pipeline_ = nil;
   id<MTLComputePipelineState> correct_v_pipeline_ = nil;
   id<MTLComputePipelineState> correct_w_pipeline_ = nil;
-  id<MTLComputePipelineState> add_pressure_pipeline_ = nil;
+  id<MTLComputePipelineState> update_total_pressure_pipeline_ = nil;
   id<MTLComputePipelineState> dot_partial_pipeline_ = nil;
   id<MTLComputePipelineState> sum_partial_pipeline_ = nil;
   id<MTLComputePipelineState> max_abs_diff_pipeline_ = nil;

@@ -287,8 +287,8 @@ void copy_active_values(const FromField& source, ToField& destination) {
   }
 }
 
-template <typename Field>
-void axpy_active(Field& destination, const Field& source, const double scale) {
+template <typename DestinationField, typename SourceField>
+void axpy_active(DestinationField& destination, const SourceField& source, const double scale) {
   const solver::IndexRange3D active = destination.layout().active_range();
 
   for(int k = active.k_begin; k < active.k_end; ++k) {
@@ -1529,6 +1529,23 @@ void test_channel_flow_poiseuille_profile_validation() {
   require(result.validation.pass, "Poiseuille smoke validation should pass");
 }
 
+void test_channel_flow_fails_fast_on_nonconverged_pressure_solve() {
+  solver::ChannelFlowConfig config = solver::load_channel_flow_config(
+      source_path("benchmarks/channel_couette_smoke.cfg"));
+  config.steps = 1;
+  config.poisson_max_iterations = 1;
+  config.poisson_tolerance = 1.0e-30;
+  config.validate_profile = false;
+
+  bool rejected = false;
+  try {
+    static_cast<void>(solver::run_channel_flow(config));
+  } catch(const std::exception& exception) {
+    rejected = std::string(exception.what()).find("pressure solve did not converge") != std::string::npos;
+  }
+  require(rejected, "channel flow should fail fast on a non-converged pressure solve");
+}
+
 void test_taylor_green_config_loader_and_boundary_conditions() {
   const solver::TaylorGreenConfig config = solver::load_taylor_green_config(
       source_path("benchmarks/taylor_green_smoke.cfg"));
@@ -1669,6 +1686,11 @@ void test_taylor_green_cpu_vs_metal_small_3d() {
   const solver::TaylorGreenResult metal_result =
       solver::run_taylor_green(metal_config, &metal_state);
 
+  solver::PressureField cpu_pressure = cpu_state.pressure_total;
+  solver::PressureField metal_pressure = metal_state.pressure_total;
+  subtract_active_mean_inplace(cpu_pressure);
+  subtract_active_mean_inplace(metal_pressure);
+
   require(metal_result.backend_used == solver::ExecutionBackend::metal,
           "metal run should report the metal backend");
   require(!metal_result.accelerator_name.empty(),
@@ -1683,12 +1705,16 @@ void test_taylor_green_cpu_vs_metal_small_3d() {
       relative_active_l2_difference(metal_state.velocity.y, cpu_state.velocity.y);
   const double velocity_z_error =
       active_l2_difference(metal_state.velocity.z, cpu_state.velocity.z);
+  const double pressure_error = relative_active_l2_difference(metal_pressure, cpu_pressure);
   const double energy_error =
       std::abs(metal_result.final_kinetic_energy - cpu_result.final_kinetic_energy) /
       cpu_result.final_kinetic_energy;
 
   require(std::max({velocity_x_error, velocity_y_error, velocity_z_error}) <= 5.0e-4,
           "metal velocity field drifted too far from the CPU reference");
+  require(pressure_error <= 5.0e-2,
+          "metal pressure field drifted too far from the CPU reference: pressure_error=" +
+              std::to_string(pressure_error));
   require(energy_error <= 1.0e-4,
           "metal kinetic energy drifted too far from the CPU reference");
 }
@@ -1742,15 +1768,29 @@ void test_taylor_green_metal_cleanup_metadata() {
       .poisson_tolerance = config.poisson_tolerance,
   };
   solver::PressureField pressure_correction{raw_run.state.grid};
+  solver::VelocityField diffusion{raw_run.state.grid};
   solver::VelocityField corrected{raw_run.state.grid};
+  solver::ScalarField pressure_rhs{raw_run.state.grid};
   const solver::ProjectionDiagnostics cleanup = solver::project_velocity(
       raw_run.state.velocity,
       boundary_conditions,
       projection_options,
       pressure_correction,
-      corrected);
+      corrected,
+      &pressure_rhs);
 
-  const solver::TaylorGreenResult result = solver::run_taylor_green(config);
+  solver::TaylorGreenState expected_state = raw_run.state;
+  expected_state.velocity = corrected;
+  axpy_active(expected_state.pressure_total, pressure_correction, 1.0);
+  axpy_active(expected_state.pressure_total,
+              pressure_rhs,
+              -0.5 * config.viscosity * raw_run.state.metrics.dt);
+  solver::compute_diffusion_term(corrected, config.viscosity, diffusion);
+  solver::apply_total_pressure_boundary_conditions(
+      boundary_conditions, diffusion, expected_state.pressure_total);
+
+  solver::TaylorGreenState final_state = solver::initialize_taylor_green_state(config);
+  const solver::TaylorGreenResult result = solver::run_taylor_green(config, &final_state);
   require(result.backend_elapsed_seconds > 0.0,
           "metal result should expose backend elapsed time");
   require(result.cleanup_elapsed_seconds > 0.0,
@@ -1760,6 +1800,45 @@ void test_taylor_green_metal_cleanup_metadata() {
   require(std::abs(result.final_step.pressure_relative_residual -
                    cleanup.pressure_solve.relative_residual) <= 1.0e-12,
           "metal final-step residual should report the cleanup projection solve");
+  require(relative_active_l2_difference(final_state.pressure_total, expected_state.pressure_total) <= 1.0e-12,
+          "metal cleanup should publish the CPU-equivalent total-pressure update");
+}
+
+void test_taylor_green_fails_fast_on_nonconverged_pressure_solve() {
+  solver::TaylorGreenConfig config = solver::load_taylor_green_config(
+      source_path("benchmarks/taylor_green_smoke.cfg"));
+  config.final_time = 0.01;
+  config.poisson_max_iterations = 1;
+  config.poisson_tolerance = 1.0e-30;
+
+  bool rejected = false;
+  try {
+    static_cast<void>(solver::run_taylor_green(config));
+  } catch(const std::exception& exception) {
+    rejected = std::string(exception.what()).find("pressure solve did not converge") != std::string::npos;
+  }
+  require(rejected, "Taylor-Green should fail fast on a non-converged pressure solve");
+}
+
+void test_taylor_green_metal_fails_fast_on_nonconverged_pressure_solve() {
+  solver::TaylorGreenConfig config = solver::load_taylor_green_config(
+      source_path("benchmarks/taylor_green_3d_smoke.cfg"));
+  config.nx = 16;
+  config.ny = 16;
+  config.nz = 16;
+  config.final_time = 0.005;
+  config.validate_energy = false;
+  config.backend = solver::ExecutionBackend::metal;
+  config.poisson_max_iterations = 1;
+  config.poisson_tolerance = 1.0e-30;
+
+  bool rejected = false;
+  try {
+    static_cast<void>(solver::run_taylor_green(config));
+  } catch(const std::exception& exception) {
+    rejected = std::string(exception.what()).find("did not converge") != std::string::npos;
+  }
+  require(rejected, "metal Taylor-Green should fail fast on a non-converged internal solve");
 }
 
 void test_lid_driven_cavity_checkpoint_roundtrip_and_checksum() {
@@ -1931,6 +2010,24 @@ void test_lid_driven_cavity_smoke_run() {
           "smoke cavity recirculation should induce negative u motion");
 }
 
+void test_lid_driven_cavity_fails_fast_on_nonconverged_pressure_solve() {
+  solver::LidDrivenCavityConfig config = solver::load_lid_driven_cavity_config(
+      source_path("benchmarks/lid_driven_cavity_smoke.cfg"));
+  config.max_steps = 1;
+  config.min_steps = 1;
+  config.poisson_max_iterations = 1;
+  config.poisson_tolerance = 1.0e-30;
+  config.validate_reference = false;
+
+  bool rejected = false;
+  try {
+    static_cast<void>(solver::run_lid_driven_cavity(config));
+  } catch(const std::exception& exception) {
+    rejected = std::string(exception.what()).find("pressure solve did not converge") != std::string::npos;
+  }
+  require(rejected, "lid-driven cavity should fail fast on a non-converged pressure solve");
+}
+
 void test_lid_driven_cavity_reference_validation_gate() {
   const solver::LidDrivenCavityReference reference = solver::re100_centerline_reference_envelope();
   const solver::LidDrivenCavityReferencePoint& u_top = reference.points[0];
@@ -2007,6 +2104,7 @@ int main() {
     test_channel_flow_config_loader_and_boundary_conditions();
     test_channel_flow_couette_profile_validation();
     test_channel_flow_poiseuille_profile_validation();
+    test_channel_flow_fails_fast_on_nonconverged_pressure_solve();
     test_taylor_green_config_loader_and_boundary_conditions();
     test_taylor_green_3d_config_loader_and_boundary_conditions();
     test_taylor_green_smoke_validation();
@@ -2015,10 +2113,13 @@ int main() {
     test_taylor_green_cpu_vs_metal_small_3d();
     test_taylor_green_metal_vtk_export();
     test_taylor_green_metal_cleanup_metadata();
+    test_taylor_green_fails_fast_on_nonconverged_pressure_solve();
+    test_taylor_green_metal_fails_fast_on_nonconverged_pressure_solve();
     test_lid_driven_cavity_checkpoint_roundtrip_and_checksum();
     test_lid_driven_cavity_restart_is_bitwise_deterministic();
     test_lid_driven_cavity_vtk_export();
     test_lid_driven_cavity_smoke_run();
+    test_lid_driven_cavity_fails_fast_on_nonconverged_pressure_solve();
     test_lid_driven_cavity_reference_validation_gate();
   } catch(const std::exception& exception) {
     std::cerr << "solver_tests failed: " << exception.what() << '\n';

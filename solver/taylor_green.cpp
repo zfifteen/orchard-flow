@@ -601,6 +601,7 @@ void run_taylor_green_steps(const TaylorGreenConfig& config,
         pressure_correction,
         corrected,
         &pressure_rhs);
+    require_converged_pressure_solve(projection, projection_options, "Taylor-Green", step + 1);
 
     axpy_active(state.pressure_total, pressure_correction, 1.0);
     axpy_active(state.pressure_total, pressure_rhs, -0.5 * config.viscosity * dt);
@@ -678,7 +679,9 @@ TaylorGreenResult run_taylor_green(const TaylorGreenConfig& config,
           .poisson_tolerance = config.poisson_tolerance,
       };
       PressureField pressure_correction{metal_run.state.grid};
+      VelocityField diffusion{metal_run.state.grid};
       VelocityField corrected{metal_run.state.grid};
+      ScalarField pressure_rhs{metal_run.state.grid};
       pressure_correction.fill(0.0);
       corrected.fill(0.0);
 
@@ -688,11 +691,21 @@ TaylorGreenResult run_taylor_green(const TaylorGreenConfig& config,
           boundary_conditions,
           projection_options,
           pressure_correction,
-          corrected);
+          corrected,
+          &pressure_rhs);
       cleanup_elapsed_seconds =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - cleanup_started).count();
+      require_converged_pressure_solve(cleanup,
+                                       projection_options,
+                                       "Taylor-Green Metal cleanup",
+                                       metal_run.state.metrics.step);
       metal_run.state.velocity = corrected;
       axpy_active(metal_run.state.pressure_total, pressure_correction, 1.0);
+      axpy_active(metal_run.state.pressure_total,
+                  pressure_rhs,
+                  -0.5 * config.viscosity * metal_run.state.metrics.dt);
+      compute_diffusion_term(corrected, config.viscosity, diffusion);
+      apply_total_pressure_boundary_conditions(boundary_conditions, diffusion, metal_run.state.pressure_total);
       metal_run.state.metrics.max_cfl =
           compute_advective_cfl(corrected, metal_run.state.metrics.dt).max_cfl;
       metal_run.state.metrics.divergence_l2 = cleanup.divergence_l2_after;

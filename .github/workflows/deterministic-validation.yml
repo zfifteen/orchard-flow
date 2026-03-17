@@ -1,0 +1,33 @@
+name: Deterministic Validation
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Deterministic Validation
+    runs-on: macos-14
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check Out Repository
+        uses: actions/checkout@v4
+
+      - name: Configure Deterministic Build
+        run: cmake --preset deterministic
+
+      - name: Build Deterministic Targets
+        run: cmake --build --preset deterministic -j 3
+
+      - name: Run Runtime Test Suite
+        run: ctest --preset deterministic
+
+      - name: Run Deterministic Validation Harness
+        run: ./validation/run_validation_suite.py --build-dir build/deterministic --output-dir validation/ci

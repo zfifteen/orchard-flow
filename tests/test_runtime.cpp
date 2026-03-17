@@ -14,6 +14,7 @@
 #include "solver/taylor_green.hpp"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -35,6 +36,21 @@ void require(bool condition, const std::string& message) {
   }
 }
 
+template <typename Fn>
+void require_exception_contains(Fn&& fn,
+                                const std::string& expected_fragment,
+                                const std::string& message) {
+  try {
+    fn();
+  } catch(const std::exception& exception) {
+    require(std::string(exception.what()).find(expected_fragment) != std::string::npos,
+            message + ": wrong exception message");
+    return;
+  }
+
+  throw std::runtime_error(message);
+}
+
 double pi() {
   return std::acos(-1.0);
 }
@@ -45,6 +61,107 @@ std::string source_path(const std::string& relative_path) {
 
 std::filesystem::path temp_path(const std::string& filename) {
   return std::filesystem::temp_directory_path() / filename;
+}
+
+std::vector<std::uint8_t> read_binary_file(const std::filesystem::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  return std::vector<std::uint8_t>(std::istreambuf_iterator<char>(input),
+                                   std::istreambuf_iterator<char>());
+}
+
+void write_binary_file(const std::filesystem::path& path,
+                       const std::vector<std::uint8_t>& bytes) {
+  std::ofstream output(path, std::ios::binary);
+  output.write(reinterpret_cast<const char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+}
+
+std::uint64_t read_le_u64(const std::vector<std::uint8_t>& bytes,
+                          const std::size_t offset) {
+  require(offset + 8 <= bytes.size(), "read_le_u64 out of range");
+  std::uint64_t value = 0;
+  for(int shift = 0; shift < 64; shift += 8) {
+    value |= static_cast<std::uint64_t>(bytes[offset + static_cast<std::size_t>(shift / 8)]) << shift;
+  }
+  return value;
+}
+
+void write_le_u32(std::vector<std::uint8_t>& bytes,
+                  const std::size_t offset,
+                  const std::uint32_t value) {
+  require(offset + 4 <= bytes.size(), "write_le_u32 out of range");
+  for(int shift = 0; shift < 32; shift += 8) {
+    bytes[offset + static_cast<std::size_t>(shift / 8)] =
+        static_cast<std::uint8_t>((value >> shift) & 0xffu);
+  }
+}
+
+void write_le_u64(std::vector<std::uint8_t>& bytes,
+                  const std::size_t offset,
+                  const std::uint64_t value) {
+  require(offset + 8 <= bytes.size(), "write_le_u64 out of range");
+  for(int shift = 0; shift < 64; shift += 8) {
+    bytes[offset + static_cast<std::size_t>(shift / 8)] =
+        static_cast<std::uint8_t>((value >> shift) & 0xffu);
+  }
+}
+
+std::uint64_t fnv1a_64(const std::uint8_t* data, const std::size_t size) {
+  std::uint64_t hash = 14695981039346656037ull;
+  for(std::size_t index = 0; index < size; ++index) {
+    hash ^= static_cast<std::uint64_t>(data[index]);
+    hash *= 1099511628211ull;
+  }
+  return hash;
+}
+
+struct CheckpointSectionView {
+  std::size_t payload_offset = 0;
+  std::size_t payload_size = 0;
+};
+
+CheckpointSectionView find_checkpoint_section(const std::vector<std::uint8_t>& bytes,
+                                              const std::array<char, 4>& tag) {
+  constexpr std::size_t kMagicBytes = 8;
+  constexpr std::size_t kHeaderBytes = 4 + 8 + 8;
+  std::size_t cursor = kMagicBytes + kHeaderBytes;
+
+  while(cursor < bytes.size()) {
+    require(cursor + 12 <= bytes.size(), "checkpoint section header truncated in test helper");
+    const std::array<char, 4> current_tag{
+        static_cast<char>(bytes[cursor]),
+        static_cast<char>(bytes[cursor + 1]),
+        static_cast<char>(bytes[cursor + 2]),
+        static_cast<char>(bytes[cursor + 3]),
+    };
+    const std::uint64_t section_size = read_le_u64(bytes, cursor + 4);
+    const std::size_t payload_offset = cursor + 12;
+    require(payload_offset + section_size <= bytes.size(),
+            "checkpoint section payload truncated in test helper");
+    if(current_tag == tag) {
+      return CheckpointSectionView{
+          .payload_offset = payload_offset,
+          .payload_size = static_cast<std::size_t>(section_size),
+      };
+    }
+    cursor = payload_offset + static_cast<std::size_t>(section_size);
+  }
+
+  throw std::runtime_error("checkpoint section not found in test helper");
+}
+
+void refresh_checkpoint_payload_header(std::vector<std::uint8_t>& bytes) {
+  constexpr std::size_t kPayloadOffset = 8 + 4 + 8 + 8;
+  const std::uint64_t payload_size = bytes.size() - kPayloadOffset;
+  write_le_u64(bytes, 12, payload_size);
+  const std::uint64_t checksum =
+      fnv1a_64(bytes.data() + kPayloadOffset, static_cast<std::size_t>(payload_size));
+  write_le_u64(bytes, 20, checksum);
+}
+
+bool metal_backend_available() {
+  static const bool available = solver::metal::is_backend_available();
+  return available;
 }
 
 double square(const double value) {
@@ -1650,6 +1767,10 @@ void test_taylor_green_backend_parser_and_metal_rejection() {
 }
 
 void test_taylor_green_cpu_vs_metal_small_3d() {
+  if(!metal_backend_available()) {
+    return;
+  }
+
   solver::TaylorGreenConfig cpu_config = solver::load_taylor_green_config(
       source_path("benchmarks/taylor_green_3d_smoke.cfg"));
   cpu_config.nx = 32;
@@ -1703,6 +1824,10 @@ void test_taylor_green_cpu_vs_metal_small_3d() {
 }
 
 void test_taylor_green_metal_vtk_export() {
+  if(!metal_backend_available()) {
+    return;
+  }
+
   solver::TaylorGreenConfig config = solver::load_taylor_green_config(
       source_path("benchmarks/taylor_green_3d_smoke.cfg"));
   config.nx = 16;
@@ -1732,6 +1857,10 @@ void test_taylor_green_metal_vtk_export() {
 }
 
 void test_taylor_green_metal_cleanup_metadata() {
+  if(!metal_backend_available()) {
+    return;
+  }
+
   solver::TaylorGreenConfig config = solver::load_taylor_green_config(
       source_path("benchmarks/taylor_green_3d_smoke.cfg"));
   config.nx = 16;
@@ -1788,6 +1917,10 @@ void test_taylor_green_metal_cleanup_metadata() {
 }
 
 void test_taylor_green_metal_fails_fast_on_nonconverged_pressure_solve() {
+  if(!metal_backend_available()) {
+    return;
+  }
+
   solver::TaylorGreenConfig config = solver::load_taylor_green_config(
       source_path("benchmarks/taylor_green_3d_smoke.cfg"));
   config.nx = 16;
@@ -1932,6 +2065,71 @@ void test_lid_driven_cavity_restart_is_bitwise_deterministic() {
   std::filesystem::remove(checkpoint_path, ignore_error);
 }
 
+void test_lid_driven_cavity_checkpoint_rejects_unsupported_version() {
+  solver::LidDrivenCavityConfig config = solver::load_lid_driven_cavity_config(
+      source_path("benchmarks/lid_driven_cavity_smoke.cfg"));
+  solver::LidDrivenCavityState state = solver::initialize_lid_driven_cavity_state(config);
+  solver::run_lid_driven_cavity_steps(config, 2, state);
+
+  const std::filesystem::path checkpoint_path = temp_path("solver_lid_version.chk");
+  solver::io::write_lid_driven_cavity_checkpoint(checkpoint_path.string(), config, state);
+  std::vector<std::uint8_t> bytes = read_binary_file(checkpoint_path);
+  write_le_u32(bytes, 8, 2u);
+  write_binary_file(checkpoint_path, bytes);
+
+  require_exception_contains(
+      [&] { static_cast<void>(solver::io::load_lid_driven_cavity_checkpoint(checkpoint_path.string(), config)); },
+      "unsupported checkpoint format version",
+      "checkpoint loader should reject unsupported format versions");
+
+  std::error_code ignore_error;
+  std::filesystem::remove(checkpoint_path, ignore_error);
+}
+
+void test_lid_driven_cavity_checkpoint_rejects_build_hash_mismatch() {
+  solver::LidDrivenCavityConfig config = solver::load_lid_driven_cavity_config(
+      source_path("benchmarks/lid_driven_cavity_smoke.cfg"));
+  solver::LidDrivenCavityState state = solver::initialize_lid_driven_cavity_state(config);
+  solver::run_lid_driven_cavity_steps(config, 2, state);
+
+  const std::filesystem::path checkpoint_path = temp_path("solver_lid_build_hash.chk");
+  solver::io::write_lid_driven_cavity_checkpoint(checkpoint_path.string(), config, state);
+  std::vector<std::uint8_t> bytes = read_binary_file(checkpoint_path);
+  const CheckpointSectionView metadata = find_checkpoint_section(bytes, {'M', 'E', 'T', 'A'});
+  const std::size_t build_hash_offset = metadata.payload_offset + 4;
+  write_le_u64(bytes, build_hash_offset, read_le_u64(bytes, build_hash_offset) ^ 0x1ull);
+  refresh_checkpoint_payload_header(bytes);
+  write_binary_file(checkpoint_path, bytes);
+
+  require_exception_contains(
+      [&] { static_cast<void>(solver::io::load_lid_driven_cavity_checkpoint(checkpoint_path.string(), config)); },
+      "checkpoint build hash does not match the current executable",
+      "checkpoint loader should reject build-hash mismatches");
+
+  std::error_code ignore_error;
+  std::filesystem::remove(checkpoint_path, ignore_error);
+}
+
+void test_lid_driven_cavity_checkpoint_rejects_configuration_mismatch() {
+  solver::LidDrivenCavityConfig written_config = solver::load_lid_driven_cavity_config(
+      source_path("benchmarks/lid_driven_cavity_smoke.cfg"));
+  solver::LidDrivenCavityState state = solver::initialize_lid_driven_cavity_state(written_config);
+  solver::run_lid_driven_cavity_steps(written_config, 2, state);
+
+  const std::filesystem::path checkpoint_path = temp_path("solver_lid_config_hash.chk");
+  solver::io::write_lid_driven_cavity_checkpoint(checkpoint_path.string(), written_config, state);
+
+  solver::LidDrivenCavityConfig expected_config = written_config;
+  expected_config.poisson_max_iterations += 1;
+  require_exception_contains(
+      [&] { static_cast<void>(solver::io::load_lid_driven_cavity_checkpoint(checkpoint_path.string(), expected_config)); },
+      "checkpoint configuration hash does not match the requested config",
+      "checkpoint loader should reject configuration mismatches");
+
+  std::error_code ignore_error;
+  std::filesystem::remove(checkpoint_path, ignore_error);
+}
+
 void test_lid_driven_cavity_vtk_export() {
   solver::LidDrivenCavityConfig config = solver::load_lid_driven_cavity_config(
       source_path("benchmarks/lid_driven_cavity_smoke.cfg"));
@@ -2063,6 +2261,9 @@ int main() {
     test_taylor_green_metal_cleanup_metadata();
     test_taylor_green_metal_fails_fast_on_nonconverged_pressure_solve();
     test_lid_driven_cavity_checkpoint_roundtrip_and_checksum();
+    test_lid_driven_cavity_checkpoint_rejects_unsupported_version();
+    test_lid_driven_cavity_checkpoint_rejects_build_hash_mismatch();
+    test_lid_driven_cavity_checkpoint_rejects_configuration_mismatch();
     test_lid_driven_cavity_restart_is_bitwise_deterministic();
     test_lid_driven_cavity_vtk_export();
     test_lid_driven_cavity_smoke_run();

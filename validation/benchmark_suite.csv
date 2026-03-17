@@ -1,0 +1,6 @@
+case,tool,config,metric_key,threshold
+couette_128,solver_channel,benchmarks/channel_couette_128.cfg,profile_relative_l2_error,profile_relative_l2_error <= 5e-3; divergence_l2 <= 1e-10
+poiseuille_128,solver_channel,benchmarks/channel_poiseuille_128.cfg,profile_relative_l2_error,profile_relative_l2_error <= 5e-3; divergence_l2 <= 1e-10
+lid_driven_cavity_re100_128,solver_cavity,benchmarks/lid_driven_cavity_re100_128.cfg,max_reference_relative_error,named centerline sample points inside accepted envelope with miss <= 2%; divergence_l2 <= 1e-10
+taylor_green_128,solver_taylor_green,benchmarks/taylor_green_128.cfg,normalized_energy_error,normalized_energy_error <= 1e-2; divergence_l2 <= 1e-10
+taylor_green_3d_64,solver_taylor_green,benchmarks/taylor_green_3d_64.cfg,normalized_energy_error,normalized_energy_error <= 1e-2; divergence_l2 <= 1e-10

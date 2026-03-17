@@ -46,6 +46,12 @@ def parse_metrics(stdout: str) -> dict[str, str]:
     return metrics
 
 
+def load_benchmark_suite(root: Path) -> list[dict[str, str]]:
+    manifest_path = root / "validation/benchmark_suite.csv"
+    with manifest_path.open(newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
 def as_float(metrics: dict[str, str], key: str) -> float:
     return float(metrics[key])
 
@@ -388,45 +394,15 @@ def write_taylor_temporal_reports(
 
 
 def write_benchmark_reports(root: Path, build_dir: Path, output_dir: Path) -> list[dict[str, object]]:
-    cases = [
-        {
-            "name": "couette_128",
-            "command": [str(root / build_dir / "tools/solver_channel"), "benchmarks/channel_couette_128.cfg"],
-            "metric_key": "profile_relative_l2_error",
-            "threshold": "profile_relative_l2_error <= 5e-3; divergence_l2 <= 1e-10",
-        },
-        {
-            "name": "poiseuille_128",
-            "command": [str(root / build_dir / "tools/solver_channel"), "benchmarks/channel_poiseuille_128.cfg"],
-            "metric_key": "profile_relative_l2_error",
-            "threshold": "profile_relative_l2_error <= 5e-3; divergence_l2 <= 1e-10",
-        },
-        {
-            "name": "lid_driven_cavity_re100_128",
-            "command": [str(root / build_dir / "tools/solver_cavity"), "benchmarks/lid_driven_cavity_re100_128.cfg"],
-            "metric_key": "max_reference_relative_error",
-            "threshold": "named centerline sample points inside accepted envelope with miss <= 2%; divergence_l2 <= 1e-10",
-        },
-        {
-            "name": "taylor_green_128",
-            "command": [str(root / build_dir / "tools/solver_taylor_green"), "benchmarks/taylor_green_128.cfg"],
-            "metric_key": "normalized_energy_error",
-            "threshold": "normalized_energy_error <= 1e-2; divergence_l2 <= 1e-10",
-        },
-        {
-            "name": "taylor_green_3d_64",
-            "command": [str(root / build_dir / "tools/solver_taylor_green"), "benchmarks/taylor_green_3d_64.cfg"],
-            "metric_key": "normalized_energy_error",
-            "threshold": "normalized_energy_error <= 1e-2; divergence_l2 <= 1e-10",
-        },
-    ]
+    cases = load_benchmark_suite(root)
 
     rows: list[dict[str, object]] = []
     for case in cases:
-        metrics = parse_metrics(run_command(case["command"], root))
+        command = [str(root / build_dir / f'tools/{case["tool"]}'), case["config"]]
+        metrics = parse_metrics(run_command(command, root))
         rows.append(
             {
-                "case": case["name"],
+                "case": case["case"],
                 "reference_dataset": metrics.get("reference_dataset", ""),
                 "metric_key": case["metric_key"],
                 "metric_value": as_float(metrics, case["metric_key"]),

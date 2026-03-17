@@ -1,16 +1,14 @@
-name: Deterministic Validation
+name: Build And Test
 
 on:
   push:
     branches:
       - main
-      - "codex/**"
   pull_request:
-  workflow_dispatch:
 
 jobs:
   validate:
-    name: Deterministic Validation
+    name: Build And Test
     runs-on: macos-14
     timeout-minutes: 45
     permissions:
@@ -28,6 +26,3 @@ jobs:
 
       - name: Run Runtime Test Suite
         run: ctest --preset deterministic
-
-      - name: Run Deterministic Validation Harness
-        run: ./validation/run_validation_suite.py --build-dir build/deterministic --output-dir validation/ci

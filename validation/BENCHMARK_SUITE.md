@@ -1,15 +1,22 @@
 # Deterministic Benchmark Suite
 
 This file documents the deterministic benchmark suite that Milestone 14 treats
-as the regression gate.
+as the manual regression gate.
 
 The source of truth is
 [`benchmark_suite.csv`](/Users/velocityworks/IdeaProjects/solver/validation/benchmark_suite.csv).
 The validation harness in
 [`run_validation_suite.py`](/Users/velocityworks/IdeaProjects/solver/validation/run_validation_suite.py)
-reads that manifest directly, and the GitHub Actions workflow in
+reads that manifest directly.
+
+GitHub Actions does not run this suite. The workflow in
 [`deterministic-validation.yml`](/Users/velocityworks/IdeaProjects/solver/.github/workflows/deterministic-validation.yml)
-enforces it in CI.
+is intentionally limited to fast deterministic build-and-test checks, while the
+full validation harness remains a manual developer workflow:
+
+```bash
+./validation/run_validation_suite.py --build-dir build/deterministic --output-dir validation/latest
+```
 
 The current suite covers:
 

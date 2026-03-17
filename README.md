@@ -306,7 +306,7 @@ Restart from that checkpoint for more steps:
 build/deterministic/tools/solver_cavity benchmarks/lid_driven_cavity_smoke.cfg --restart /tmp/solver.chk --steps 6
 ```
 
-Today’s automated coverage still spans the full deterministic validation gate. The current test executable checks that:
+Today’s GitHub Actions coverage is intentionally limited to the fast deterministic build-and-test gate. The current test executable checks that:
 
 - the build profile is one of the locked profile names
 - the runtime platform is Apple Silicon
@@ -345,7 +345,7 @@ Today’s automated coverage still spans the full deterministic validation gate.
 - the cavity smoke run remains stable and divergence controlled
 - the cavity validation harness samples the named reference points correctly and rejects out-of-range results
 
-The broader verification harness that closes Milestone 9 lives outside `solver_tests` in `validation/run_validation_suite.py`. Its generated outputs in `validation/latest/` currently include:
+The broader verification harness that closes Milestone 9 lives outside `solver_tests` in `validation/run_validation_suite.py`. It is run manually when we want full numerical evidence rather than on every GitHub Actions run. Its generated outputs in `validation/latest/` currently include:
 
 - operator spatial-convergence tables and SVG plots
 - Taylor-Green temporal self-convergence tables and SVG plots

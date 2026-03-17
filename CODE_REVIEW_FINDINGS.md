@@ -291,7 +291,7 @@ if(diagnostics.relative_residual <= options.poisson_tolerance) {
 
 The convergence test compares the **relative** residual (`||r_k|| / ||r_0||`)
 against `poisson_tolerance`. The default tolerance is `1.0e-12`. This is a
-relative tolerance check, which is standard for preconditioned CG. **No error.**
+relative tolerance check, which is standard for preconditioned CG.
 
 However, the initial convergence check at line 735 uses the **absolute** residual:
 

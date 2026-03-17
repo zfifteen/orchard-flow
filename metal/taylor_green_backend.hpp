@@ -12,6 +12,7 @@ struct TaylorGreenMetalRun {
   double elapsed_seconds = 0.0;
 };
 
+[[nodiscard]] bool is_backend_available();
 [[nodiscard]] TaylorGreenMetalRun run_taylor_green(const TaylorGreenConfig& config);
 
 }  // namespace solver::metal

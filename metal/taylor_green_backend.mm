@@ -879,6 +879,12 @@ class MetalRunner {
 
 }  // namespace
 
+bool is_backend_available() {
+  @autoreleasepool {
+    return MTLCreateSystemDefaultDevice() != nil;
+  }
+}
+
 TaylorGreenMetalRun run_taylor_green(const TaylorGreenConfig& config) {
   MetalRunner runner{config};
   return runner.run();
